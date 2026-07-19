@@ -2,7 +2,7 @@
 // @name         Sam GitHub Assistant
 // @name:zh-CN   Sam 的 GitHub 个人助手
 // @namespace    https://github.com/Sam404s/sam-gitHub-assistant
-// @version      1.0.1
+// @version      1.0.2
 // @description  Personal GitHub helper: Chinese localization, repo/release sizes, release downloads/uploaders, high-speed clone/raw/release/ZIP links, quick repo links, active forks, and in-place multilingual README switching.
 // @description:zh-CN  个人 GitHub 助手：GitHub 中文化、仓库/Release 大小、Release 下载次数/上传者、高速 Clone/Raw/Release/ZIP 链接、仓库快捷入口、活跃 Forks 查询、多语言 README 原地切换。
 // @author       Sam404s
@@ -29993,6 +29993,33 @@
     return String(value || '');
   }
 
+  // GitHub's global search is a React/custom-element tree. Keep both the
+  // trigger and the whole modal shell outside the localization queue.
+  const GITHUB_SEARCH_UI_SELECTOR = [
+    '#search-suggestions-dialog',
+    '[data-target="qbsearch-input.searchSuggestionsDialog"]',
+    '[data-target^="qbsearch-input."]',
+    '#query-builder-test-form',
+    'query-builder.search-query-builder',
+    '.search-input-container.search-with-dialog',
+    '.search-suggestions.query-builder-container',
+    '.QueryBuilder',
+  ].join(', ');
+
+  function isGitHubSearchUiOpen() {
+    if (!document || !document.querySelector) return false;
+    const dialog = document.querySelector('#search-suggestions-dialog, [data-target="qbsearch-input.searchSuggestionsDialog"]');
+    if (!dialog) return false;
+    return dialog.hasAttribute('open') || !dialog.classList.contains('Overlay--hidden');
+  }
+
+  function discardLocalizationQueue() {
+    while (localizationQueue.length) {
+      const queued = localizationQueue.shift();
+      if (queued && typeof queued === 'object') localizationQueuedNodes.delete(queued);
+    }
+  }
+
   function isIgnoredLocalizationNode(node) {
     let current = node && node.nodeType === 3 ? node.parentElement : node;
     while (current && current.nodeType === 1) {
@@ -30029,6 +30056,14 @@
 
       const testId = String(typeof current.getAttribute === 'function' ? current.getAttribute('data-testid') || '' : '');
       if (/(query-builder|command-palette|typeahead|global-search|header-search)/i.test(testId)) return true;
+
+      if (typeof current.matches === 'function') {
+        try {
+          if (current.matches(GITHUB_SEARCH_UI_SELECTOR)) return true;
+        } catch (_) {
+          // Ignore selector compatibility issues and continue with class/role checks.
+        }
+      }
 
       if (/\b(markdown-body|blob-code|cm-line|react-code-text|react-directory-row|react-directory-filename-column|AppHeader-context|AppHeader-search|header-search|search-match|QueryBuilder|qb-input|styled-input-content)\b/i.test(className)) {
         return true;
@@ -30156,6 +30191,10 @@
 
   function localizeGitHubPage() {
     if (!isLocalizationEnabled() || !document.body) return;
+    if (isGitHubSearchUiOpen()) {
+      discardLocalizationQueue();
+      return;
+    }
     enqueueLocalizationNode(document.body);
     const translatedTitle = translateGitHubText(document.title || '');
     if (translatedTitle) document.title = translatedTitle;
@@ -30179,6 +30218,10 @@
 
     const observer = new MutationObserver((mutations) => {
       if (!isLocalizationEnabled()) return;
+      if (isGitHubSearchUiOpen()) {
+        discardLocalizationQueue();
+        return;
+      }
       if (!Array.isArray(mutations)) {
         scheduleLocalization(300);
         return;
@@ -30197,6 +30240,14 @@
       attributes: true,
       attributeFilter: ['title', 'aria-label', 'placeholder', 'value', 'data-confirm', 'data-confirm-text', 'data-disable-with'],
     });
+
+    // Clear already queued work before GitHub expands the search modal.
+    document.addEventListener('click', (event) => {
+      const target = event && event.target;
+      if (target && target.closest && target.closest('[data-target^="qbsearch-input."], #search-suggestions-dialog')) {
+        discardLocalizationQueue();
+      }
+    }, true);
 
     window.addEventListener('popstate', () => scheduleLocalization(160));
     window.addEventListener('turbo:render', () => scheduleLocalization(160));

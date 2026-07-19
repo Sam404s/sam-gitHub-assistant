@@ -73,7 +73,13 @@ sam-gitHub-assistant.js
 3. 提交并推送到 `main`
 4. 用户端 Tampermonkey 会通过 `@updateURL` 自动拉取更新
 
-当前版本：**1.0.1**
+当前版本：**1.0.2**
+
+### 1.0.2
+
+- 进一步修复 GitHub 首页全局搜索栏偶发消失的问题
+- 完整忽略 `#search-suggestions-dialog`、`qbsearch-input.*`、`query-builder-container` 等搜索触发器与弹窗外壳
+- 搜索弹窗打开期间暂停本地化队列，并清理已排队的 DOM 翻译任务
 
 ### 1.0.1
 
