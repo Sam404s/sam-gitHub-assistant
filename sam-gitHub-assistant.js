@@ -2,9 +2,9 @@
 // @name         Sam GitHub Assistant
 // @name:zh-CN   Sam 的 GitHub 个人助手
 // @namespace    https://github.com/Sam404s/sam-gitHub-assistant
-// @version      1.0.2
-// @description  Personal GitHub helper: Chinese localization, repo/release sizes, release downloads/uploaders, high-speed clone/raw/release/ZIP links, quick repo links, active forks, and in-place multilingual README switching.
-// @description:zh-CN  个人 GitHub 助手：GitHub 中文化、仓库/Release 大小、Release 下载次数/上传者、高速 Clone/Raw/Release/ZIP 链接、仓库快捷入口、活跃 Forks 查询、多语言 README 原地切换。
+// @version      1.1.0
+// @description  Personal GitHub helper: Chinese localization, repo/file/folder/release sizes and counts, styled file lists, high-speed clone/raw/release/ZIP links, quick repo links, active forks, and in-place multilingual README switching.
+// @description:zh-CN  个人 GitHub 助手：GitHub 中文化、仓库/文件/文件夹/Release 大小与数量、文件列表美化、高速 Clone/Raw/Release/ZIP 链接、仓库快捷入口、活跃 Forks 查询、多语言 README 原地切换。
 // @author       Sam404s
 // @homepageURL  https://github.com/Sam404s/sam-gitHub-assistant
 // @supportURL   https://github.com/Sam404s/sam-gitHub-assistant/issues
@@ -39,6 +39,9 @@
   const MIRROR_SPEED_CACHE_TTL = 3 * 60 * 60 * 1000;
   const MIRROR_SPEED_TEST_TARGET = 'https://github.com/favicon.ico';
   const MIRROR_SPEED_TIMEOUT = 4500;
+  const DIRECT_RAW_MIRROR_LIMIT = 3;
+  const DIRECT_RELEASE_MIRROR_LIMIT = 4;
+  const DIRECT_CODE_MIRROR_LIMIT = 3;
   const REPO_META_CACHE_TTL = 6 * 60 * 60 * 1000;
   const GITHUB_API_SECONDARY_BACKOFF_TTL = 60 * 60 * 1000;
   const GITHUB_API_RATE_LIMIT_BACKOFF_TTL = 15 * 60 * 1000;
@@ -56,6 +59,14 @@
   const GITHUB_API_BACKOFF_HOST_KEY = `${STORAGE_API_BACKOFF_PREFIX}api.github.com`;
   const REPO_SIZE_BADGE_ID = 'sam-github-repo-size-badge';
   const ITEM_SIZE_BADGE_CLASS = `${SCRIPT_ID}-item-size-badge`;
+  const FILE_LIST_ROW_CLASS = `${SCRIPT_ID}-file-row`;
+  const SEARCH_INTERACTION_HOLD_MS = 1400;
+  const TOAST_DISPLAY_MS = 1800;
+  const RENDER_DELAY_NORMAL_MS = 160;
+  const RENDER_DELAY_FAST_MS = 80;
+  const LOCALIZATION_FLUSH_DELAY_MS = 400;
+  const LOCALIZATION_BATCH_SIZE = 120;
+  const LOCALIZATION_BATCH_TIME_MS = 8;
   const FALLBACK_MIRROR_NODES = [{ label: 'default', value: DEFAULT_MIRROR_HOST }];
   let mirrorNodes = FALLBACK_MIRROR_NODES.slice();
   let selectedMirrorHost = DEFAULT_MIRROR_HOST;
@@ -75,6 +86,8 @@
   let localizationInstalled = false;
   let localizationTimer = 0;
   let localizationFlushTimer = 0;
+  let searchInteractionUntil = 0;
+  let searchResumeTimer = 0;
   const localizationQueue = [];
   const localizationQueuedNodes = new WeakSet();
   let githubChineseI18NCache = null;
@@ -29459,8 +29472,15 @@
   }
 
   function getRepoContext(inputUrl) {
-    const url = inputUrl instanceof URL ? inputUrl : new URL(String(inputUrl), window.location.origin);
-    if (url.hostname !== 'github.com') return null;
+    // Input validation
+    if (!inputUrl || (typeof inputUrl !== 'string' && !(inputUrl instanceof URL))) {
+      console.warn('[Sam GitHub Assistant] Invalid URL input:', inputUrl);
+      return null;
+    }
+
+    try {
+      const url = inputUrl instanceof URL ? inputUrl : new URL(String(inputUrl), window.location.origin);
+      if (url.hostname !== 'github.com') return null;
 
     const parts = url.pathname.split('/').filter(Boolean);
     if (parts.length === 0) {
@@ -29507,6 +29527,10 @@
       branch,
       filePath,
     };
+    } catch (error) {
+      console.warn('[Sam GitHub Assistant] Failed to parse repo context:', inputUrl, error.message);
+      return null;
+    }
   }
 
   function normalizeMirrorHost(host) {
@@ -29521,7 +29545,8 @@
     if (!targetUrl) return '';
     try {
       return buildMirrorUrl(mirrorHost, new URL(String(targetUrl), 'https://github.com').href);
-    } catch (_) {
+    } catch (error) {
+      console.warn('[Sam GitHub Assistant] Failed to build accelerated URL:', targetUrl, error.message);
       return '';
     }
   }
@@ -29531,7 +29556,8 @@
     let url;
     try {
       url = new URL(String(href), 'https://github.com');
-    } catch (_) {
+    } catch (error) {
+      console.warn('[Sam GitHub Assistant] Invalid blob href:', href, error.message);
       return '';
     }
 
@@ -29779,9 +29805,37 @@
     }
   }
 
+  function sanitizeHtml(html) {
+    // Simple HTML sanitizer - removes scripts and dangerous attributes
+    const temp = document.createElement('div');
+    temp.textContent = ''; // Clear any content
+
+    // Create a sandboxed iframe for safe parsing
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+
+    // Remove all script tags
+    doc.querySelectorAll('script, style, link[rel="import"]').forEach(el => el.remove());
+
+    // Remove dangerous event handlers and attributes
+    const dangerousAttrs = ['onerror', 'onload', 'onclick', 'onmouseover', 'onfocus', 'onblur'];
+    doc.querySelectorAll('*').forEach(el => {
+      dangerousAttrs.forEach(attr => el.removeAttribute(attr));
+      // Remove javascript: protocol
+      ['href', 'src', 'action', 'formaction'].forEach(attr => {
+        const val = el.getAttribute(attr);
+        if (val && val.toLowerCase().trim().startsWith('javascript:')) {
+          el.removeAttribute(attr);
+        }
+      });
+    });
+
+    return doc.body.innerHTML;
+  }
+
   function fixReadmeRelativePaths(html, blobUrl) {
     const temp = document.createElement('div');
-    temp.innerHTML = html;
+    temp.innerHTML = sanitizeHtml(html);
     let base;
     try {
       base = new URL(blobUrl, window.location.origin);
@@ -29825,7 +29879,10 @@
 
     const replacement = document.createElement('div');
     replacement.className = `${SCRIPT_ID}-readme-switcher`;
-    replacement.innerHTML = '<div class="color-fg-muted p-4 text-center">Loading README...</div>';
+    const loadingDiv = document.createElement('div');
+    loadingDiv.className = 'color-fg-muted p-4 text-center';
+    loadingDiv.textContent = 'Loading README...';
+    replacement.appendChild(loadingDiv);
     wrapper.parentElement.insertBefore(replacement, wrapper.nextSibling);
     readmeReplacement = replacement;
 
@@ -29834,7 +29891,12 @@
       if (!response || !response.ok) throw new Error(`HTTP ${response ? response.status : 'unknown'}`);
       const html = parseReadmeArticleHtml(await response.text(), blobUrl);
       if (!html) throw new Error('README markdown content not found');
-      replacement.innerHTML = `<div class="markdown-body p-3">${html}</div>`;
+      // Clear and safely append sanitized content
+      replacement.textContent = '';
+      const contentDiv = document.createElement('div');
+      contentDiv.className = 'markdown-body p-3';
+      contentDiv.innerHTML = html; // Already sanitized by fixReadmeRelativePaths -> sanitizeHtml
+      replacement.appendChild(contentDiv);
     } catch (error) {
       console.warn('Sam GitHub Assistant: multilingual README switch failed', error);
       restoreOriginalReadme();
@@ -29993,8 +30055,8 @@
     return String(value || '');
   }
 
-  // GitHub's global search is a React/custom-element tree. Keep both the
-  // trigger and the whole modal shell outside the localization queue.
+  // GitHub's global search is a React/custom-element tree. Protect the trigger,
+  // its mount transition, and the complete dialog from localization/enhancement writes.
   const GITHUB_SEARCH_UI_SELECTOR = [
     '#search-suggestions-dialog',
     '[data-target="qbsearch-input.searchSuggestionsDialog"]',
@@ -30004,13 +30066,69 @@
     '.search-input-container.search-with-dialog',
     '.search-suggestions.query-builder-container',
     '.QueryBuilder',
+    '.AppHeader-search',
+    '.header-search',
+    '[data-testid*="search" i]',
+    '[role="search"]',
+    '[role="searchbox"]',
   ].join(', ');
+
+  function isGitHubSearchTarget(node) {
+    const element = node && node.nodeType === 3 ? node.parentElement : node;
+    if (!element || typeof element.closest !== 'function') return false;
+    try {
+      if (element.closest(GITHUB_SEARCH_UI_SELECTOR)) return true;
+      return Boolean(element.closest([
+        'button[aria-label*="Search" i]',
+        'button[aria-label*="搜索"]',
+        'input[placeholder*="Search" i]',
+        'input[placeholder*="搜索"]',
+      ].join(', '))?.closest('header, .AppHeader, .Header'));
+    } catch (_) {
+      return Boolean(element.closest('.AppHeader-search, .header-search, #search-suggestions-dialog, [data-target^="qbsearch-input."]'));
+    }
+  }
 
   function isGitHubSearchUiOpen() {
     if (!document || !document.querySelector) return false;
-    const dialog = document.querySelector('#search-suggestions-dialog, [data-target="qbsearch-input.searchSuggestionsDialog"]');
-    if (!dialog) return false;
-    return dialog.hasAttribute('open') || !dialog.classList.contains('Overlay--hidden');
+    const dialogs = Array.from(document.querySelectorAll([
+      '#search-suggestions-dialog',
+      '[data-target="qbsearch-input.searchSuggestionsDialog"]',
+      'dialog[aria-label*="Search" i]',
+      'dialog[aria-label*="搜索"]',
+    ].join(', ')));
+    return dialogs.some((dialog) => {
+      if (dialog.hidden || dialog.getAttribute('aria-hidden') === 'true') return false;
+      if (dialog.closest('.Overlay--hidden, [aria-hidden="true"], [hidden]')) return false;
+      if (String(dialog.tagName || '').toUpperCase() === 'DIALOG') {
+        return Boolean(dialog.open || dialog.hasAttribute('open'));
+      }
+      if (typeof window.getComputedStyle === 'function') {
+        const style = window.getComputedStyle(dialog);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+      }
+      return true;
+    });
+  }
+
+  function isGitHubSearchUiActive() {
+    if (Date.now() < searchInteractionUntil || isGitHubSearchUiOpen()) return true;
+    const active = document && document.activeElement;
+    if (!active || !isGitHubSearchTarget(active)) return false;
+    return /^(INPUT|TEXTAREA)$/.test(String(active.tagName || ''))
+      || active.isContentEditable
+      || Boolean(active.closest && active.closest('#search-suggestions-dialog, dialog, .QueryBuilder'));
+  }
+
+  function holdGitHubSearchUi(duration = SEARCH_INTERACTION_HOLD_MS) {
+    searchInteractionUntil = Math.max(searchInteractionUntil, Date.now() + duration);
+    discardLocalizationQueue();
+    window.clearTimeout(searchResumeTimer);
+    searchResumeTimer = window.setTimeout(() => {
+      searchResumeTimer = 0;
+      if (isGitHubSearchUiActive()) return;
+      scheduleLocalization(120);
+    }, duration + 40);
   }
 
   function discardLocalizationQueue() {
@@ -30139,7 +30257,7 @@
     window.setTimeout(() => {
       localizationFlushTimer = 0;
       flushLocalizationQueue();
-    }, delay);
+    }, delay || LOCALIZATION_FLUSH_DELAY_MS);
   }
 
   function enqueueLocalizationNode(node) {
@@ -30153,16 +30271,24 @@
 
   function flushLocalizationQueue() {
     if (!isLocalizationEnabled()) {
-      localizationQueue.length = 0;
+      discardLocalizationQueue();
+      return;
+    }
+    if (isGitHubSearchUiActive()) {
+      discardLocalizationQueue();
       return;
     }
 
     const startedAt = Date.now();
     let processed = 0;
-    while (localizationQueue.length && processed < 120 && Date.now() - startedAt < 8) {
+    while (localizationQueue.length && processed < LOCALIZATION_BATCH_SIZE && Date.now() - startedAt < LOCALIZATION_BATCH_TIME_MS) {
+      if (isGitHubSearchUiActive()) {
+        discardLocalizationQueue();
+        return;
+      }
       const node = localizationQueue.shift();
       if (node && typeof node === 'object') localizationQueuedNodes.delete(node);
-      localizeNode(node);
+      if (!isIgnoredLocalizationNode(node)) localizeNode(node);
       processed += 1;
     }
 
@@ -30191,7 +30317,7 @@
 
   function localizeGitHubPage() {
     if (!isLocalizationEnabled() || !document.body) return;
-    if (isGitHubSearchUiOpen()) {
+    if (isGitHubSearchUiActive()) {
       discardLocalizationQueue();
       return;
     }
@@ -30218,7 +30344,7 @@
 
     const observer = new MutationObserver((mutations) => {
       if (!isLocalizationEnabled()) return;
-      if (isGitHubSearchUiOpen()) {
+      if (isGitHubSearchUiActive()) {
         discardLocalizationQueue();
         return;
       }
@@ -30241,11 +30367,26 @@
       attributeFilter: ['title', 'aria-label', 'placeholder', 'value', 'data-confirm', 'data-confirm-text', 'data-disable-with'],
     });
 
-    // Clear already queued work before GitHub expands the search modal.
-    document.addEventListener('click', (event) => {
+    // Freeze before React starts mounting QueryBuilder. Pointer/focus events fire
+    // earlier than click, closing the transient window that previously lost search.
+    const protectSearchInteraction = (event) => {
+      if (isGitHubSearchTarget(event && event.target)) holdGitHubSearchUi();
+    };
+    document.addEventListener('pointerdown', protectSearchInteraction, true);
+    document.addEventListener('focusin', protectSearchInteraction, true);
+    document.addEventListener('focusout', (event) => {
+      if (!isGitHubSearchTarget(event && event.target)) return;
+      window.setTimeout(() => {
+        if (!isGitHubSearchUiActive()) scheduleLocalization(120);
+      }, SEARCH_INTERACTION_HOLD_MS + 60);
+    }, true);
+    document.addEventListener('click', protectSearchInteraction, true);
+    document.addEventListener('keydown', (event) => {
+      const key = String(event && event.key || '').toLowerCase();
       const target = event && event.target;
-      if (target && target.closest && target.closest('[data-target^="qbsearch-input."], #search-suggestions-dialog')) {
-        discardLocalizationQueue();
+      const editable = target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(String(target.tagName || '')));
+      if ((!editable && key === '/') || ((event.metaKey || event.ctrlKey) && key === 'k')) {
+        holdGitHubSearchUi(SEARCH_INTERACTION_HOLD_MS + 600);
       }
     }, true);
 
@@ -30316,6 +30457,53 @@
     const normalized = normalizeMirrorHost(selectedMirrorHost);
     if (mirrorNodes.some((node) => node.value === normalized)) return normalized;
     return getFastestMirrorHost();
+  }
+
+  function getDirectDownloadMirrors(limit) {
+    const selected = getSelectedMirrorHost();
+    const candidates = mirrorNodes
+      .map((node, index) => ({
+        label: formatMirrorNodeLabel(node && node.label),
+        value: normalizeMirrorHost(node && node.value),
+        index,
+        speed: getMirrorSpeed(node && node.value),
+      }))
+      .filter((node) => node.value);
+
+    candidates.sort((a, b) => {
+      const selectedOrder = Number(b.value === selected) - Number(a.value === selected);
+      if (selectedOrder) return selectedOrder;
+      const aFast = Boolean(a.speed && a.speed.ok && isFreshMirrorSpeed(a.speed));
+      const bFast = Boolean(b.speed && b.speed.ok && isFreshMirrorSpeed(b.speed));
+      if (aFast !== bFast) return Number(bFast) - Number(aFast);
+      if (aFast && bFast) {
+        const latencyOrder = Number(a.speed.latency) - Number(b.speed.latency);
+        if (latencyOrder) return latencyOrder;
+      }
+      return a.index - b.index;
+    });
+
+    const seen = new Set();
+    return candidates.filter((node) => {
+      if (seen.has(node.value)) return false;
+      seen.add(node.value);
+      return true;
+    }).slice(0, Math.max(1, Number(limit) || 1));
+  }
+
+  function getDirectMirrorLabel(node) {
+    const label = formatMirrorNodeLabel(node && node.label);
+    const host = normalizeMirrorHost(node && node.value);
+    const genericLabels = new Set(['默认', '贡献', '搜索', '镜像']);
+    const value = genericLabels.has(label) ? host : label;
+    return value.length > 14 ? `${value.slice(0, 13)}…` : value;
+  }
+
+  function getDirectMirrorTitle(node, actionText) {
+    const status = getMirrorSpeedStatus(node && node.value);
+    return `镜像：${normalizeMirrorHost(node && node.value)}
+状态：${status.text}
+${actionText}`;
   }
 
   function readJsonStorage(key, fallback) {
@@ -30825,14 +31013,15 @@
     const cached = readJsonStorage(getTreeStorageKey(repoPath, branch), null);
     if (!cached || !Array.isArray(cached.tree) || !cached.fetchedAt) return null;
     if (Date.now() - Number(cached.fetchedAt) > REPO_META_CACHE_TTL) return null;
-    return cached.tree;
+    return { tree: cached.tree, truncated: Boolean(cached.truncated) };
   }
 
-  function writeCachedTree(repoPath, branch, tree) {
-    if (!repoPath || !Array.isArray(tree)) return;
+  function writeCachedTree(repoPath, branch, payload) {
+    if (!repoPath || !payload || !Array.isArray(payload.tree)) return;
     writeJsonStorage(getTreeStorageKey(repoPath, branch), {
       fetchedAt: Date.now(),
-      tree,
+      tree: payload.tree,
+      truncated: Boolean(payload.truncated),
     });
   }
 
@@ -30858,7 +31047,7 @@
   async function fetchRepoTree(ctx, branch) {
     const json = await requestJson(buildGitHubTreeApiUrl(ctx, branch));
     if (!json || json.message || !Array.isArray(json.tree)) return null;
-    return json.tree;
+    return { tree: json.tree, truncated: Boolean(json.truncated) };
   }
 
   async function fetchReleaseAssets(ctx) {
@@ -30866,7 +31055,27 @@
     return flattenReleaseAssets(releases);
   }
 
-  function parseDirectoryLink(link, ctx) {
+  function getRepositoryFileRows() {
+    const selectors = [
+      '.react-directory-row',
+      '[role="row"].Box-row',
+      '.js-navigation-container .js-navigation-item',
+      'table.files tr.js-navigation-item',
+    ];
+    return Array.from(new Set(document.querySelectorAll(selectors.join(', '))));
+  }
+
+  function decodePathParts(parts) {
+    return parts.map((part) => {
+      try {
+        return decodeURIComponent(part);
+      } catch (_) {
+        return part;
+      }
+    });
+  }
+
+  function parseRepositoryEntryLink(link, ctx) {
     if (!link || !ctx || !ctx.repoPath) return null;
     let url;
     try {
@@ -30876,24 +31085,138 @@
     }
     if (url.hostname !== 'github.com') return null;
 
-    const parts = url.pathname.split('/').filter(Boolean);
-    if (parts.length < 5) return null;
-    if (parts[0] !== ctx.owner || parts[1] !== ctx.repo || parts[2] !== 'tree') return null;
+    const parts = decodePathParts(url.pathname.split('/').filter(Boolean));
+    if (parts.length < 5 || parts[0] !== ctx.owner || parts[1] !== ctx.repo) return null;
+    const kind = parts[2] === 'tree' ? 'folder' : (parts[2] === 'blob' ? 'file' : '');
+    if (!kind) return null;
 
     const branch = parts[3];
     const path = parts.slice(4).join('/');
     if (!branch || !path) return null;
-    return { link, branch, path };
+    return {
+      link,
+      row: typeof link.closest === 'function' ? link.closest('.react-directory-row, [role="row"], .js-navigation-item, tr') : link.parentElement,
+      branch,
+      path,
+      kind,
+      name: path.split('/').pop() || path,
+    };
   }
 
-  function collectDirectoryLinks(ctx) {
-    return Array.from(document.querySelectorAll('a[href]'))
-      .map((link) => parseDirectoryLink(link, ctx))
-      .filter(Boolean);
+  function collectRepositoryEntries(ctx) {
+    const seenRows = new Set();
+    const entries = [];
+    getRepositoryFileRows().forEach((row) => {
+      const parsed = Array.from(row.querySelectorAll('a[href]'))
+        .map((link) => parseRepositoryEntryLink(link, ctx))
+        .filter(Boolean);
+      const entry = parsed[0];
+      if (!entry || seenRows.has(entry.row)) return;
+      entry.links = parsed
+        .filter((item) => item.branch === entry.branch && item.path === entry.path && item.kind === entry.kind)
+        .map((item) => item.link);
+      seenRows.add(entry.row);
+      entries.push(entry);
+    });
+    return entries;
+  }
+
+  function getFileExtension(name) {
+    const normalized = String(name || '').toLowerCase();
+    if (!normalized || normalized.startsWith('.') && normalized.indexOf('.', 1) < 0) return normalized.replace(/^\./, '') || 'file';
+    const index = normalized.lastIndexOf('.');
+    return index > 0 ? normalized.slice(index + 1) : 'file';
+  }
+
+  function hashString(value) {
+    let hash = 0;
+    for (const char of String(value || '')) hash = ((hash << 5) - hash + char.charCodeAt(0)) | 0;
+    return Math.abs(hash);
+  }
+
+  function getFileTypeColor(extension) {
+    const palette = {
+      js: '#f1c40f', jsx: '#61dafb', ts: '#3178c6', tsx: '#3178c6',
+      py: '#3776ab', rs: '#dea584', go: '#00add8', java: '#b07219',
+      html: '#e34c26', css: '#663399', scss: '#c6538c', vue: '#42b883',
+      json: '#8b949e', yaml: '#cb171e', yml: '#cb171e', md: '#0969da',
+      sh: '#4eaa25', ps1: '#2563eb', sql: '#e38c00', xml: '#f97316',
+      png: '#a855f7', jpg: '#a855f7', jpeg: '#a855f7', gif: '#a855f7',
+      webp: '#a855f7', svg: '#ffb13b', ico: '#a855f7', pdf: '#dc2626',
+      zip: '#795548', gz: '#795548', tar: '#795548', lock: '#6e7781',
+    };
+    if (palette[extension]) return palette[extension];
+    return `hsl(${hashString(extension) % 360} 58% 48%)`;
+  }
+
+  function ensureImageThumbnail(entry) {
+    if (!entry || entry.kind !== 'file' || !entry.row) return;
+    const extension = getFileExtension(entry.name);
+    if (!['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico', 'avif'].includes(extension)) return;
+
+    (entry.links || [entry.link]).forEach((link) => {
+      const host = typeof link.closest === 'function'
+        ? link.closest('.react-directory-filename-column, td, .js-navigation-item')
+        : link.parentElement;
+      const icon = host && host.querySelector('svg.octicon-file, svg[aria-label="File"], svg');
+      if (!host || host.querySelector(`.${SCRIPT_ID}-file-thumbnail`)) return;
+
+      const rawUrl = buildRawUrlFromBlobHref(link.href || link.getAttribute('href'));
+      if (!rawUrl) return;
+      const image = document.createElement('img');
+      image.className = `${SCRIPT_ID}-file-thumbnail`;
+      image.alt = '';
+      image.loading = 'eager';
+      image.decoding = 'async';
+      image.addEventListener('load', () => {
+        image.dataset.loaded = 'true';
+        if (icon && icon.style) icon.style.display = 'none';
+      }, { once: true });
+      image.addEventListener('error', () => {
+        if (icon && icon.style) icon.style.display = '';
+        image.remove();
+      }, { once: true });
+      image.src = rawUrl;
+      host.insertBefore(image, icon || host.firstChild);
+    });
+  }
+
+  function beautifyRepositoryFileList(ctx) {
+    if (!ctx || !['repo', 'tree'].includes(ctx.pageType)) return;
+    collectRepositoryEntries(ctx).forEach((entry) => {
+      if (!entry.row || !entry.link) return;
+      entry.row.classList.add(FILE_LIST_ROW_CLASS, `${FILE_LIST_ROW_CLASS}-${entry.kind}`);
+      (entry.links || [entry.link]).forEach((link) => {
+        link.dataset.samFileKind = entry.kind;
+      });
+      if (entry.kind === 'folder') {
+        entry.row.style.setProperty('--sam-file-accent', 'var(--fgColor-accent, #0969da)');
+        return;
+      }
+      const extension = getFileExtension(entry.name);
+      (entry.links || [entry.link]).forEach((link) => {
+        link.dataset.samFileType = extension;
+      });
+      entry.row.style.setProperty('--sam-file-accent', getFileTypeColor(extension));
+      ensureImageThumbnail(entry);
+    });
+  }
+
+  function getReleaseAssetRow(link) {
+    if (!link || typeof link.closest !== 'function') return null;
+    const row = link.closest('li.Box-row, [role="row"], tr');
+    const linkHost = link.parentElement;
+    const metadataHost = linkHost && linkHost.nextElementSibling;
+    if (!row || !linkHost || !metadataHost || metadataHost.parentElement !== row) return null;
+    if (!row.closest('.Box-footer, details')) return null;
+    return row;
   }
 
   function parseReleaseAssetLink(link, ctx) {
-    if (!link || !ctx || !ctx.repoPath) return null;
+    if (!link || !ctx || !ctx.repoPath || isInsideAssistant(link)) return null;
+    if (typeof link.closest === 'function' && link.closest(`.${SCRIPT_ID}-release-tools`)) return null;
+    const row = getReleaseAssetRow(link);
+    if (!row) return null;
     let url;
     try {
       url = new URL(link.getAttribute('href') || '', window.location.origin);
@@ -30910,6 +31233,7 @@
 
     return {
       link,
+      row,
       href: url.href,
       assetName: decodeURIComponent(parts.slice(5).join('/')),
     };
@@ -30929,17 +31253,51 @@
     return link.parentElement;
   }
 
-  function getReleaseToolsTarget(link) {
-    const row = getItemSizeTarget(link);
-    const host = link?.parentElement?.nextElementSibling || row;
-    if (!host) return null;
+  function getRepositoryMetadataTargets(entry) {
+    const targets = (entry && (entry.links || [entry.link]) || [])
+      .map((link) => {
+        if (!link) return null;
+        if (typeof link.closest === 'function') {
+          return link.closest('.react-directory-filename-column, td, .js-navigation-item') || link.parentElement;
+        }
+        return link.parentElement;
+      })
+      .filter(Boolean);
+    return Array.from(new Set(targets));
+  }
 
-    let tools = host.querySelector(`.${SCRIPT_ID}-release-tools`);
+  function getReleaseToolsTarget(link) {
+    const row = getReleaseAssetRow(link);
+    const nameHost = link && link.parentElement;
+    const host = nameHost && nameHost.nextElementSibling;
+    if (!row || !host || host.parentElement !== row) return null;
+
+    Array.from(row.querySelectorAll(`.${SCRIPT_ID}-release-tools-host`)).forEach((candidate) => {
+      if (candidate !== host) candidate.classList.remove(`${SCRIPT_ID}-release-tools-host`);
+    });
+    host.classList.add(`${SCRIPT_ID}-release-tools-host`);
+
+    let nativeMetadata = host.querySelector(`:scope > .${SCRIPT_ID}-release-native-meta`);
+    if (!nativeMetadata) {
+      nativeMetadata = document.createElement('div');
+      nativeMetadata.className = `${SCRIPT_ID}-release-native-meta`;
+      host.insertBefore(nativeMetadata, host.firstChild);
+      Array.from(host.childNodes).forEach((node) => {
+        if (node === nativeMetadata) return;
+        if (node.nodeType === Node.ELEMENT_NODE && node.classList.contains(`${SCRIPT_ID}-release-tools`)) return;
+        nativeMetadata.appendChild(node);
+      });
+    }
+
+    let tools = row.querySelector(`.${SCRIPT_ID}-release-tools`);
     if (!tools) {
       tools = document.createElement('div');
       tools.className = `${SCRIPT_ID}-release-tools`;
-      host.appendChild(tools);
     }
+    if (tools.parentElement !== host) host.appendChild(tools);
+    Array.from(row.querySelectorAll(`.${SCRIPT_ID}-release-tools`)).forEach((candidate) => {
+      if (candidate !== tools) candidate.remove();
+    });
     return tools;
   }
 
@@ -31012,7 +31370,7 @@
       target.appendChild(node);
     }
     const count = Number(asset.downloadCount) || 0;
-    node.textContent = `${count} DL`;
+    setTextContentIfChanged(node, `${count} DL`);
     node.title = `${count} downloads`;
     node.setAttribute('aria-label', `${count} downloads`);
     return node;
@@ -31036,6 +31394,12 @@
     return link ? (link.getAttribute('href') || link.href || '') : '';
   }
 
+  function setTextContentIfChanged(node, value) {
+    if (!node) return;
+    const text = String(value ?? '');
+    if (node.textContent !== text) node.textContent = text;
+  }
+
   function setExternalLink(link, href, title) {
     link.href = href;
     link.setAttribute('href', href);
@@ -31055,7 +31419,7 @@
       target.appendChild(link);
     }
     link.className = `${SCRIPT_ID}-fast-link ${className} ${extraClassName}`.trim();
-    link.textContent = label;
+    setTextContentIfChanged(link, label);
     setExternalLink(link, href, title);
     return link;
   }
@@ -31066,43 +31430,102 @@
     if (!rawButton || isInsideAssistant(rawButton)) return;
 
     const rawUrl = buildRawUrlFromBlobHref(window.location.href);
-    const mirrorHost = getSelectedMirrorHost();
-    const fastUrl = buildAcceleratedUrl(rawUrl, mirrorHost);
-    if (!fastUrl) return;
-
+    if (!rawUrl) return;
     const target = rawButton.parentElement || rawButton;
-    upsertFastLink(
-      target,
-      `${SCRIPT_ID}-fast-raw`,
-      '加速下载',
-      fastUrl,
-      `当前镜像：${mirrorHost}\n点击打开加速 Raw 下载`,
+    const mirrors = getDirectDownloadMirrors(DIRECT_RAW_MIRROR_LIMIT);
+    const activeHosts = new Set(mirrors.map((node) => node.value));
+    Array.from(target.querySelectorAll(`.${SCRIPT_ID}-fast-raw`)).forEach((link) => {
+      if (!activeHosts.has(normalizeMirrorHost(link.dataset.mirrorHost))) link.remove();
+    });
+
+    let reference = rawButton;
+    mirrors.forEach((node, index) => {
+      let link = Array.from(target.querySelectorAll(`.${SCRIPT_ID}-fast-raw`))
+        .find((candidate) => normalizeMirrorHost(candidate.dataset.mirrorHost) === node.value);
+      if (!link) link = rawButton.cloneNode(false);
+      link.className = [
+        rawButton.className || '',
+        `${SCRIPT_ID}-fast-raw`,
+        `${SCRIPT_ID}-tone-fast`,
+        index === 0 ? `${SCRIPT_ID}-mirror-primary` : '',
+        index === mirrors.length - 1 ? `${SCRIPT_ID}-fast-raw-last` : '',
+      ].filter(Boolean).join(' ');
+      link.dataset.mirrorHost = node.value;
+      link.dataset.mirrorRank = String(index);
+      setTextContentIfChanged(link, getDirectMirrorLabel(node));
+      link.removeAttribute('data-testid');
+      setExternalLink(
+        link,
+        buildAcceleratedUrl(rawUrl, node.value),
+        getDirectMirrorTitle(node, '点击打开该镜像的 Raw 文件'),
+      );
+      link.setAttribute('aria-label', `使用 ${node.value} 打开 Raw 文件`);
+      insertAfter(link, reference);
+      reference = link;
+    });
+  }
+
+  function upsertReleaseMirrorLink(target, item, node, index) {
+    let link = Array.from(target.querySelectorAll(`.${SCRIPT_ID}-release-fast`))
+      .find((candidate) => normalizeMirrorHost(candidate.dataset.mirrorHost) === node.value);
+    if (!link) {
+      link = document.createElement('a');
+      target.appendChild(link);
+    }
+    link.className = [
+      `${SCRIPT_ID}-fast-link`,
+      `${SCRIPT_ID}-release-fast`,
       `${SCRIPT_ID}-tone-fast`,
+      index === 0 ? `${SCRIPT_ID}-mirror-primary` : '',
+      'btn',
+      'btn-sm',
+    ].filter(Boolean).join(' ');
+    link.dataset.mirrorHost = node.value;
+    link.dataset.mirrorRank = String(index);
+    setTextContentIfChanged(link, getDirectMirrorLabel(node));
+    setExternalLink(
+      link,
+      buildAcceleratedUrl(item.href, node.value),
+      `${getDirectMirrorTitle(node, '点击使用该镜像下载')}
+文件：${item.assetName}`,
     );
+    link.setAttribute('aria-label', `使用 ${node.value} 下载 ${item.assetName}`);
+    target.appendChild(link);
+    return link;
   }
 
   function ensureReleaseFastLinks(ctx) {
     if (!ctx || ctx.pageType !== 'releases') return;
     Array.from(document.querySelectorAll(`.${SCRIPT_ID}-release-uploader`)).forEach((node) => node.remove());
-    const mirrorHost = getSelectedMirrorHost();
-    collectReleaseAssetLinks(ctx).forEach((item) => {
-      const target = getReleaseToolsTarget(item.link) || getItemSizeTarget(item.link) || item.link.parentElement;
-      upsertFastLink(
-        target,
-        `${SCRIPT_ID}-release-fast`,
-        '加速下载',
-        buildAcceleratedUrl(item.href, mirrorHost),
-        `当前镜像：${mirrorHost}\n文件：${item.assetName}\n点击打开加速下载`,
-        `${SCRIPT_ID}-tone-fast`,
-      );
-      upsertFastLink(
+    const items = collectReleaseAssetLinks(ctx);
+    const activeRows = new Set(items.map((item) => item.row));
+    Array.from(document.querySelectorAll(`.${SCRIPT_ID}-release-tools`)).forEach((tools) => {
+      const row = tools.closest('li.Box-row, [role="row"], tr');
+      if (activeRows.has(row)) return;
+      const host = tools.parentElement;
+      tools.remove();
+      if (host) host.classList.remove(`${SCRIPT_ID}-release-tools-host`);
+    });
+
+    const mirrors = getDirectDownloadMirrors(DIRECT_RELEASE_MIRROR_LIMIT);
+    const activeHosts = new Set(mirrors.map((node) => node.value));
+    items.forEach((item) => {
+      const target = getReleaseToolsTarget(item.link);
+      if (!target) return;
+      Array.from(target.querySelectorAll(`.${SCRIPT_ID}-release-fast`)).forEach((link) => {
+        if (!activeHosts.has(normalizeMirrorHost(link.dataset.mirrorHost))) link.remove();
+      });
+      mirrors.forEach((node, index) => upsertReleaseMirrorLink(target, item, node, index));
+      const originalLink = upsertFastLink(
         target,
         `${SCRIPT_ID}-release-original`,
-        '原链接下载',
+        'GitHub 原链接',
         item.href,
-        `文件：${item.assetName}\n镜像不可用时使用 GitHub 原链接下载`,
-        `${SCRIPT_ID}-tone-original`,
+        `文件：${item.assetName}
+镜像不可用时使用 GitHub 原链接下载`,
+        `btn btn-sm ${SCRIPT_ID}-tone-original`,
       );
+      if (originalLink) target.appendChild(originalLink);
     });
   }
 
@@ -31131,30 +31554,38 @@
     return input ? (input.className || '') : '';
   }
 
-  function getCodeCloneButtonClass(sourceInput) {
+  function getCodeCloneCopyControl(sourceInput) {
     const row = sourceInput && sourceInput.parentElement;
-    const button = row && row.querySelector ? row.querySelector('button') : null;
-    return button ? (button.className || '') : '';
+    if (!row || !row.querySelector) return null;
+    return row.querySelector('clipboard-copy, button');
   }
 
-  function buildCloneCommandTitle(command, mirrorValue) {
-    const hostText = mirrorValue ? `当前镜像：${mirrorValue}` : '点击可直接复制';
-    return `${command}\n\n${hostText}\n点击可直接复制`;
+  function getCodeCloneButtonClass(sourceInput) {
+    const control = getCodeCloneCopyControl(sourceInput);
+    return control ? (control.className || '') : '';
   }
 
-  function buildCodeZipTitle(mirrorValue) {
-    return `当前镜像：${mirrorValue}\n点击打开加速下载`;
+  function buildCloneCommandTitle(command, mirrorNode) {
+    const mirrorText = mirrorNode
+      ? `镜像：${normalizeMirrorHost(mirrorNode.value)}\n状态：${getMirrorSpeedStatus(mirrorNode.value).text}`
+      : 'GitHub SSH over 443';
+    return `${command}\n\n${mirrorText}\n点击整行直接复制`;
   }
 
-  function upsertCodeCloneRow(dialog, sourceInput, className, command, title, referenceNode) {
+  function buildCodeZipTitle(mirrorNode) {
+    return getDirectMirrorTitle(mirrorNode, '点击使用该镜像下载 ZIP');
+  }
+
+  function upsertCodeCloneRow(dialog, sourceInput, className, commandKey, command, title, referenceNode, copyLabel) {
     if (!dialog || !sourceInput || !command) return null;
     const sourceRow = sourceInput.parentElement || dialog;
     const rowTagName = String(sourceRow.tagName || 'div').toLowerCase();
     const existing = Array.from(dialog.querySelectorAll(`.${SCRIPT_ID}-code-clone-row`))
-      .find((row) => getCodeCloneRowKey(row) === className);
+      .find((row) => getCodeCloneRowKey(row) === commandKey);
     const row = existing || document.createElement(rowTagName);
     row.className = `${SCRIPT_ID}-code-clone-row ${className} ${sourceRow.className || ''}`.trim();
-    row.dataset.commandKey = className;
+    row.dataset.commandKey = commandKey;
+    row.dataset.copyLabel = copyLabel || '克隆命令';
     if (row.style) {
       row.style.marginTop = '4px';
       row.style.cursor = 'copy';
@@ -31177,13 +31608,20 @@
     input.title = title;
     input.setAttribute('title', title);
 
+    const sourceCopyControl = getCodeCloneCopyControl(sourceInput);
     let button = row.querySelector(`.${SCRIPT_ID}-code-clone-copy`);
     if (!button) {
-      button = document.createElement('button');
+      button = sourceCopyControl && typeof sourceCopyControl.cloneNode === 'function'
+        ? sourceCopyControl.cloneNode(true)
+        : document.createElement('button');
       row.appendChild(button);
     }
     button.className = `${SCRIPT_ID}-code-clone-copy ${getCodeCloneButtonClass(sourceInput)}`.trim();
-    button.type = 'button';
+    if (String(button.tagName || '').toUpperCase() === 'BUTTON') button.type = 'button';
+    if (String(button.tagName || '').toUpperCase() === 'CLIPBOARD-COPY') {
+      button.setAttribute('value', command);
+    }
+    button.removeAttribute('id');
     button.title = title;
     button.setAttribute('title', title);
     button.setAttribute('aria-label', '复制克隆命令');
@@ -31194,7 +31632,7 @@
       button.addEventListener('click', (event) => {
         if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
         const currentInput = row.querySelector(`.${SCRIPT_ID}-code-clone-input`);
-        copyText(currentInput ? currentInput.value : '', '克隆命令');
+        copyText(currentInput ? currentInput.value : '', row.dataset.copyLabel || '克隆命令');
       });
       button.dataset.copyBound = 'true';
     }
@@ -31206,15 +31644,15 @@
       row.addEventListener('click', () => {
         const currentInput = row.querySelector(`.${SCRIPT_ID}-code-clone-input`);
         if (currentInput && typeof currentInput.select === 'function') currentInput.select();
-        copyText(currentInput ? currentInput.value : '', '克隆命令');
+        copyText(currentInput ? currentInput.value : '', row.dataset.copyLabel || '克隆命令');
       });
       row.dataset.copyBound = 'true';
     }
     return row;
   }
 
-  function upsertCodeZipItem(zipLink, href, title, label) {
-    if (!zipLink || !href) return null;
+  function upsertCodeZipItem(zipLink, mirrorNode, href, title, label, referenceNode) {
+    if (!zipLink || !mirrorNode || !href) return null;
     let sourceItem = typeof zipLink.closest === 'function' ? zipLink.closest('li') : null;
     if (!sourceItem && zipLink.parentElement && String(zipLink.parentElement.tagName || '').toLowerCase() === 'li') {
       sourceItem = zipLink.parentElement;
@@ -31231,13 +31669,15 @@
       );
     }
 
-    let item = sourceItem.parentElement.querySelector(`.${SCRIPT_ID}-code-zip-item`);
+    let item = Array.from(sourceItem.parentElement.querySelectorAll(`.${SCRIPT_ID}-code-zip-item`))
+      .find((candidate) => normalizeMirrorHost(candidate.dataset.mirrorHost) === mirrorNode.value);
     if (!item) {
       item = typeof sourceItem.cloneNode === 'function'
         ? sourceItem.cloneNode(true)
         : document.createElement(String(sourceItem.tagName || 'li').toLowerCase());
     }
     item.className = `${SCRIPT_ID}-code-zip-item ${sourceItem.className || ''}`.trim();
+    item.dataset.mirrorHost = mirrorNode.value;
 
     let link = item.querySelector('a[href$=".zip"]') || item.querySelector('a[href]');
     if (!link) {
@@ -31246,13 +31686,13 @@
       item.appendChild(link);
     }
     link.className = `${SCRIPT_ID}-code-zip ${SCRIPT_ID}-tone-fast ${zipLink.className || ''}`.trim();
-    link.textContent = label;
+    setTextContentIfChanged(link, label);
     setExternalLink(link, href, title);
 
     const textNode = item.querySelector('span[id]') || item.querySelector('span');
-    if (textNode) textNode.textContent = label;
+    if (textNode) setTextContentIfChanged(textNode, label);
 
-    insertAfter(item, sourceItem);
+    insertAfter(item, referenceNode || sourceItem);
     return item;
   }
 
@@ -31338,20 +31778,34 @@
     if (!ctx || !ctx.repoPath) return;
     getCodeOverlayScopes().forEach((dialog) => {
       if (isInsideAssistant(dialog)) return;
-      const mirrorHost = getSelectedMirrorHost();
+      const mirrors = getDirectDownloadMirrors(DIRECT_CODE_MIRROR_LIMIT);
+      const activeCloneKeys = new Set();
       cleanupDuplicateCodeCloneRows(dialog);
 
       const httpsInput = findCodeCloneSource(dialog, 'input[value^="https://github.com"], clipboard-copy[value^="https://github.com"]');
-      let httpsCloneRow = null;
+      let cloneReference = httpsInput ? (httpsInput.parentElement || dialog) : null;
       if (httpsInput) {
-        const fastClone = buildAcceleratedUrl(getCommandValue(httpsInput), mirrorHost);
-        httpsCloneRow = upsertCodeCloneRow(
-          dialog,
-          httpsInput,
-          `${SCRIPT_ID}-code-clone-https`,
-          fastClone ? `git clone ${fastClone}` : '',
-          buildCloneCommandTitle(fastClone ? `git clone ${fastClone}` : '', mirrorHost),
-        );
+        mirrors.forEach((node, index) => {
+          const fastClone = buildAcceleratedUrl(getCommandValue(httpsInput), node.value);
+          const command = fastClone ? `git clone ${fastClone}` : '';
+          const commandKey = `${SCRIPT_ID}-code-clone-https:${node.value}`;
+          activeCloneKeys.add(commandKey);
+          const row = upsertCodeCloneRow(
+            dialog,
+            httpsInput,
+            `${SCRIPT_ID}-code-clone-https${index === 0 ? ` ${SCRIPT_ID}-mirror-primary` : ''}`,
+            commandKey,
+            command,
+            buildCloneCommandTitle(command, node),
+            cloneReference,
+            `${getDirectMirrorLabel(node)} 克隆命令`,
+          );
+          if (row) {
+            row.dataset.mirrorHost = node.value;
+            row.dataset.mirrorRank = String(index);
+            cloneReference = row;
+          }
+        });
       }
 
       const sshInput = findCodeCloneSource(dialog, 'input[value^="git@github.com:"], clipboard-copy[value^="git@github.com:"]');
@@ -31359,25 +31813,52 @@
         ? buildSsh443CloneUrl(getCommandValue(sshInput))
         : buildSsh443CloneUrl(`git@github.com:${ctx.repoPath}.git`);
       if (ssh443 && (sshInput || httpsInput)) {
-        upsertCodeCloneRow(
+        const commandKey = `${SCRIPT_ID}-code-clone-ssh`;
+        activeCloneKeys.add(commandKey);
+        cloneReference = upsertCodeCloneRow(
           dialog,
           sshInput || httpsInput,
           `${SCRIPT_ID}-code-clone-ssh`,
+          commandKey,
           `git clone ${ssh443}`,
-          buildCloneCommandTitle(`git clone ${ssh443}`, mirrorHost),
-          httpsCloneRow || (httpsInput ? (httpsInput.parentElement || dialog) : null),
-        );
+          buildCloneCommandTitle(`git clone ${ssh443}`),
+          cloneReference || (httpsInput ? (httpsInput.parentElement || dialog) : null),
+          'SSH 443 克隆命令',
+        ) || cloneReference;
       }
 
-      const zipLink = dialog.querySelector('a[href$=".zip"]');
+      Array.from(dialog.querySelectorAll(`.${SCRIPT_ID}-code-clone-row`)).forEach((row) => {
+        if (!activeCloneKeys.has(getCodeCloneRowKey(row))) row.remove();
+      });
+      cleanupDuplicateCodeCloneRows(dialog);
+
+      const zipLink = Array.from(dialog.querySelectorAll('a[href$=".zip"]'))
+        .find((link) => !hasClassToken(link, `${SCRIPT_ID}-code-zip`));
       if (zipLink) {
         const zipUrl = new URL(getLinkHref(zipLink), window.location.origin).href;
-        upsertCodeZipItem(
-          zipLink,
-          buildAcceleratedUrl(zipUrl, mirrorHost),
-          buildCodeZipTitle(mirrorHost),
-          '加速下载',
-        );
+        const activeHosts = new Set(mirrors.map((node) => node.value));
+        const sourceItem = typeof zipLink.closest === 'function' ? zipLink.closest('li') : null;
+        const itemParent = sourceItem && sourceItem.parentElement;
+        if (itemParent) {
+          Array.from(itemParent.querySelectorAll(`.${SCRIPT_ID}-code-zip-item`)).forEach((item) => {
+            if (!activeHosts.has(normalizeMirrorHost(item.dataset.mirrorHost))) item.remove();
+          });
+        }
+        let zipReference = sourceItem;
+        mirrors.forEach((node, index) => {
+          const item = upsertCodeZipItem(
+            zipLink,
+            node,
+            buildAcceleratedUrl(zipUrl, node.value),
+            buildCodeZipTitle(node),
+            `Download ZIP · ${getDirectMirrorLabel(node)}`,
+            zipReference,
+          );
+          if (item) {
+            item.dataset.mirrorRank = String(index);
+            zipReference = item;
+          }
+        });
       }
     });
   }
@@ -31388,61 +31869,89 @@
     ensureCodeDialogAccelerators(ctx);
   }
 
-  function renderDirectorySizes(ctx, branch, tree) {
-    collectDirectoryLinks(ctx)
-      .filter((item) => item.branch === branch)
-      .forEach((item) => {
-        const size = calculateDirectorySizeFromTree(tree, item.path);
-        upsertItemSizeBadge(getItemSizeTarget(item.link), formatBytes(size), `Folder size: ${item.path}`);
-      });
+  function buildTreeMetadataIndex(tree) {
+    const index = new Map();
+    (Array.isArray(tree) ? tree : []).forEach((item) => {
+      if (!item || item.type !== 'blob' || !item.path) return;
+      const size = Number(item.size) || 0;
+      index.set(item.path, { kind: 'file', size, fileCount: 1 });
+      const parts = String(item.path).split('/');
+      for (let depth = 1; depth < parts.length; depth += 1) {
+        const dirPath = parts.slice(0, depth).join('/');
+        const current = index.get(dirPath) || { kind: 'folder', size: 0, fileCount: 0 };
+        current.size += size;
+        current.fileCount += 1;
+        index.set(dirPath, current);
+      }
+    });
+    return index;
   }
 
-  function removeDirectorySizeBadges(ctx) {
-    if (!ctx || !['repo', 'tree'].includes(ctx.pageType)) return;
-    Array.from(document.querySelectorAll(`.${ITEM_SIZE_BADGE_CLASS}`)).forEach((badge) => {
-      if (String(badge.title || '').startsWith('Folder size:')) badge.remove();
-    });
+  function formatFileCount(count) {
+    return `${Math.max(0, Number(count) || 0)} 个文件`;
+  }
+
+  function renderFileListMetadata(ctx, branch, payload) {
+    if (!payload || !Array.isArray(payload.tree)) return;
+    const index = buildTreeMetadataIndex(payload.tree);
+    collectRepositoryEntries(ctx)
+      .filter((item) => item.branch === branch)
+      .forEach((item) => {
+        const metadata = index.get(item.path);
+        if (!metadata) return;
+        const incomplete = payload.truncated ? '，Git Tree 响应已截断，结果可能不完整' : '';
+        const kindLabel = item.kind === 'folder' ? '文件夹' : '文件';
+        const text = `${formatBytes(metadata.size)} · ${formatFileCount(metadata.fileCount)}`;
+        getRepositoryMetadataTargets(item).forEach((target) => {
+          upsertItemSizeBadge(
+            target,
+            text,
+            `${kindLabel}：${item.path}
+大小：${formatBytes(metadata.size)}
+文件数：${metadata.fileCount}${incomplete}`,
+            `${SCRIPT_ID}-file-metadata ${SCRIPT_ID}-tone-size${payload.truncated ? ` ${SCRIPT_ID}-metadata-truncated` : ''}`,
+          );
+        });
+      });
   }
 
   function ensureDirectorySizes(ctx) {
     if (!ctx || !ctx.repoPath || !['repo', 'tree'].includes(ctx.pageType)) return;
 
-    const dirsByBranch = new Map();
-    collectDirectoryLinks(ctx).forEach((item) => {
-      if (!dirsByBranch.has(item.branch)) dirsByBranch.set(item.branch, []);
-      dirsByBranch.get(item.branch).push(item);
+    const entriesByBranch = new Map();
+    collectRepositoryEntries(ctx).forEach((item) => {
+      if (!entriesByBranch.has(item.branch)) entriesByBranch.set(item.branch, []);
+      entriesByBranch.get(item.branch).push(item);
     });
-    if (!dirsByBranch.size) return;
+    if (!entriesByBranch.size) return;
 
-    dirsByBranch.forEach((_items, branch) => {
+    entriesByBranch.forEach((_items, branch) => {
       const cacheKey = `${ctx.repoPath}:${branch}`;
       if (repoTreesByKey.has(cacheKey)) {
-        renderDirectorySizes(ctx, branch, repoTreesByKey.get(cacheKey));
+        renderFileListMetadata(ctx, branch, repoTreesByKey.get(cacheKey));
         return;
       }
 
       const cached = readCachedTree(ctx.repoPath, branch);
       if (cached) {
         repoTreesByKey.set(cacheKey, cached);
-        renderDirectorySizes(ctx, branch, cached);
+        renderFileListMetadata(ctx, branch, cached);
         return;
       }
 
-      if (readGitHubApiBackoff()) return;
-
-      if (repoTreeRequests.has(cacheKey)) return;
+      if (readGitHubApiBackoff() || repoTreeRequests.has(cacheKey)) return;
       repoTreeRequests.add(cacheKey);
 
       fetchRepoTree(ctx, branch)
-        .then((tree) => {
-          if (!tree) return;
-          repoTreesByKey.set(cacheKey, tree);
-          writeCachedTree(ctx.repoPath, branch, tree);
+        .then((payload) => {
+          if (!payload) return;
+          repoTreesByKey.set(cacheKey, payload);
+          writeCachedTree(ctx.repoPath, branch, payload);
           const currentCtx = getRepoContext(window.location);
-          if (currentCtx && currentCtx.repoPath === ctx.repoPath) renderDirectorySizes(currentCtx, branch, tree);
+          if (currentCtx && currentCtx.repoPath === ctx.repoPath) renderFileListMetadata(currentCtx, branch, payload);
         })
         .catch((error) => {
-          warnFetchFailure('Sam GitHub Assistant: directory size fetch failed', error);
+          warnFetchFailure('Sam GitHub Assistant: file metadata fetch failed', error);
         })
         .finally(() => {
           repoTreeRequests.delete(cacheKey);
@@ -31457,8 +31966,9 @@
     collectReleaseAssetLinks(ctx).forEach((item) => {
       const asset = assets[item.href] || assets[item.assetName];
       if (!asset) return;
-      const target = getReleaseToolsTarget(item.link) || getItemSizeTarget(item.link);
-      const row = getItemSizeTarget(item.link);
+      const target = getReleaseToolsTarget(item.link);
+      const row = item.row || getReleaseAssetRow(item.link);
+      if (!target || !row) return;
       removeReleaseUploader(target);
       upsertReleaseDownloadCount(target, asset);
       upsertItemSizeBadge(
@@ -31508,9 +32018,11 @@
   }
 
   function ensurePageEnhancements(ctx) {
-    removeDirectorySizeBadges(ctx);
+    if (isGitHubSearchUiActive()) return;
     ensureActiveForksButton(ctx);
     ensureHighSpeedDownloads(ctx);
+    beautifyRepositoryFileList(ctx);
+    ensureDirectorySizes(ctx);
     ensureRepoMeta(ctx).then(() => {
       if (readGitHubApiBackoff()) return;
       ensureReleaseAssetSizes(ctx);
@@ -31622,7 +32134,7 @@
     node.className = `${SCRIPT_ID}-toast`;
     node.textContent = message;
     document.body.appendChild(node);
-    window.setTimeout(() => node.remove(), 1800);
+    window.setTimeout(() => node.remove(), TOAST_DISPLAY_MS);
   }
 
   function injectStyle() {
@@ -31681,6 +32193,12 @@
         width: min(340px, calc(100vw - 32px));
         color: var(--sam-hs-text);
         font: 13px/1.45 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      body:has(#search-suggestions-dialog[open]) .${SCRIPT_ID},
+      body:has(dialog[aria-label*="Search" i][open]) .${SCRIPT_ID},
+      body:has(dialog[aria-label*="搜索"][open]) .${SCRIPT_ID} {
+        visibility: hidden;
+        pointer-events: none;
       }
       .${SCRIPT_ID}[data-collapsed="true"] {
         width: 52px;
@@ -32183,11 +32701,17 @@
         }
       }
       .${SCRIPT_ID}-code-clone-row {
-        margin-top: 6px;
+        display: flex;
+        align-items: stretch;
+        width: 100%;
+        min-width: 0;
+        margin-top: 4px;
       }
       .${SCRIPT_ID}-code-clone-input {
         display: block;
-        width: 100%;
+        flex: 1 1 auto;
+        width: 1%;
+        min-width: 0;
         min-height: 34px;
         margin: 0;
         padding: 6px 9px;
@@ -32198,12 +32722,254 @@
         font: 12px/20px ui-monospace, SFMono-Regular, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
         cursor: copy;
         box-sizing: border-box;
+        border-radius: 8px 0 0 8px;
         box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.06);
+      }
+      .${SCRIPT_ID}-code-clone-copy {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 auto;
+        min-width: 38px;
+        margin-left: -1px;
+        border-radius: 0 8px 8px 0;
       }
       .${SCRIPT_ID}-code-clone-input:focus {
         border-color: var(--sam-hs-accent);
         outline: 2px solid rgba(37, 99, 235, 0.24);
         outline-offset: 0;
+      }
+      /* Repository file-list enhancement: scoped to actual directory rows. */
+      .${FILE_LIST_ROW_CLASS} {
+        --sam-file-accent: var(--fgColor-muted, #656d76);
+      }
+      .${FILE_LIST_ROW_CLASS} .octicon-file,
+      .${FILE_LIST_ROW_CLASS} .octicon-file-directory,
+      .${FILE_LIST_ROW_CLASS} .octicon-file-directory-fill,
+      .${FILE_LIST_ROW_CLASS} .react-directory-filename-column > svg {
+        color: var(--sam-file-accent) !important;
+      }
+      .${FILE_LIST_ROW_CLASS}-folder a[data-sam-file-kind="folder"] {
+        color: var(--fgColor-accent, #0969da);
+        font-weight: 650;
+      }
+      .${FILE_LIST_ROW_CLASS}-file a[data-sam-file-type]::after {
+        content: attr(data-sam-file-type);
+        display: inline-flex;
+        align-items: center;
+        min-height: 16px;
+        margin-left: 7px;
+        padding: 0 5px;
+        border: 1px solid color-mix(in srgb, var(--sam-file-accent) 36%, transparent);
+        border-radius: 999px;
+        background: color-mix(in srgb, var(--sam-file-accent) 10%, transparent);
+        color: var(--sam-file-accent);
+        font: 600 9px/14px ui-monospace, SFMono-Regular, Consolas, monospace;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+        vertical-align: 1px;
+      }
+      .${SCRIPT_ID}-file-thumbnail {
+        display: none;
+        width: 22px;
+        height: 22px;
+        flex: 0 0 22px;
+        margin: -3px 6px -3px 0;
+        border: 1px solid var(--borderColor-muted, rgba(27, 31, 36, 0.15));
+        border-radius: 4px;
+        background: var(--bgColor-muted, #f6f8fa);
+        object-fit: cover;
+        box-shadow: 0 1px 2px rgba(31, 35, 40, 0.10);
+      }
+      .${SCRIPT_ID}-file-thumbnail[data-loaded="true"] {
+        display: inline-block;
+      }
+      .${SCRIPT_ID}-file-metadata {
+        flex: 0 0 auto;
+        min-width: 132px;
+        min-height: 18px;
+        margin-left: auto;
+        padding-top: 0;
+        padding-bottom: 0;
+        border-radius: 6px;
+        overflow: hidden;
+        color: var(--fgColor-accent, #0969da);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        background: var(--bgColor-accent-muted, #ddf4ff);
+        border-color: var(--borderColor-accent-muted, rgba(9, 105, 218, 0.35));
+      }
+      @media (max-width: 900px) {
+        .${FILE_LIST_ROW_CLASS}-file a[data-sam-file-type]::after {
+          display: none;
+        }
+      }
+      .${SCRIPT_ID}-metadata-truncated::after {
+        content: "*";
+        margin-left: 2px;
+        color: var(--fgColor-attention, #9a6700);
+      }
+
+      /* Direct mirror actions: native GitHub geometry with explicit destinations. */
+      .${SCRIPT_ID}-release-tools-host {
+        min-width: 0;
+      }
+      .${SCRIPT_ID}-release-native-meta {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        flex: 1 1 auto;
+        min-width: 0;
+      }
+      .${SCRIPT_ID}-release-tools-host > .${SCRIPT_ID}-release-tools {
+        flex: 0 1 auto;
+        min-width: 0;
+        margin: -3px 0 -3px 8px;
+      }
+      .${SCRIPT_ID}-release-tools {
+        display: inline-flex;
+        align-items: center;
+        flex-wrap: nowrap;
+        flex-shrink: 1;
+        gap: 4px;
+        width: auto;
+        max-width: 300px;
+        vertical-align: middle;
+      }
+      .${SCRIPT_ID}-release-tools .${SCRIPT_ID}-fast-link {
+        min-width: 0;
+        min-height: 26px;
+        max-width: 66px;
+        margin: 0;
+        padding: 3px 7px;
+        overflow: hidden;
+        border-radius: 6px;
+        text-overflow: ellipsis;
+        box-shadow: none;
+        transform: none;
+      }
+      .${SCRIPT_ID}-release-tools .${SCRIPT_ID}-fast-link:hover {
+        transform: none;
+      }
+      .${SCRIPT_ID}-release-tools .${SCRIPT_ID}-release-original {
+        max-width: 96px;
+      }
+      .${SCRIPT_ID}-fast-link.${SCRIPT_ID}-mirror-primary,
+      .${SCRIPT_ID}-fast-raw.${SCRIPT_ID}-mirror-primary {
+        border-color: var(--borderColor-success-emphasis, #1f883d) !important;
+        background: var(--bgColor-success-muted, #dafbe1) !important;
+        color: var(--fgColor-success, #1a7f37) !important;
+        font-weight: 700 !important;
+      }
+      .${SCRIPT_ID}-fast-raw {
+        position: relative;
+        z-index: 0;
+        max-width: 112px;
+        margin-left: -1px !important;
+        overflow: hidden;
+        border-radius: 0 !important;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        box-shadow: none !important;
+        transform: none !important;
+      }
+      .${SCRIPT_ID}-fast-raw-last {
+        border-radius: 0 6px 6px 0 !important;
+      }
+      a[data-testid="raw-button"]:has(+ .${SCRIPT_ID}-fast-raw) {
+        border-radius: 6px 0 0 6px !important;
+      }
+      .${SCRIPT_ID}-code-zip-item {
+        display: list-item;
+      }
+      .${SCRIPT_ID}-code-zip,
+      .${SCRIPT_ID}-fast-link.${SCRIPT_ID}-code-zip {
+        display: flex !important;
+        width: 100% !important;
+        max-width: none !important;
+        min-height: inherit !important;
+        margin: 0 !important;
+        padding: inherit !important;
+        border: 0 !important;
+        border-radius: inherit !important;
+        background: color-mix(in srgb, var(--bgColor-success-muted, #dafbe1) 52%, transparent) !important;
+        color: var(--fgColor-success, #1a7f37) !important;
+        font: inherit !important;
+        font-weight: 600 !important;
+        line-height: inherit !important;
+        box-shadow: none !important;
+      }
+      .${SCRIPT_ID}-code-zip-item[data-mirror-rank="0"] .${SCRIPT_ID}-code-zip {
+        background: var(--bgColor-success-muted, #dafbe1) !important;
+        box-shadow: inset 3px 0 0 var(--borderColor-success-emphasis, #1f883d) !important;
+      }
+      .${SCRIPT_ID}-code-zip:hover,
+      .${SCRIPT_ID}-fast-link.${SCRIPT_ID}-code-zip:hover {
+        background: color-mix(in srgb, var(--bgColor-success-muted, #dafbe1) 86%, var(--bgColor-default, #ffffff)) !important;
+        color: var(--fgColor-success, #1a7f37) !important;
+      }
+      .${SCRIPT_ID}-code-clone-row.${SCRIPT_ID}-mirror-primary .${SCRIPT_ID}-code-clone-input {
+        border-color: var(--borderColor-success-emphasis, #1f883d);
+        background: color-mix(in srgb, var(--bgColor-success-muted, #dafbe1) 45%, var(--bgColor-default, #ffffff));
+      }
+      .${SCRIPT_ID}-code-clone-row:hover .${SCRIPT_ID}-code-clone-input {
+        border-color: var(--borderColor-accent-emphasis, #0969da);
+      }
+      @media (max-width: 1011px) {
+        .${SCRIPT_ID}-release-tools-host {
+          align-items: stretch;
+          flex-direction: column;
+          flex-wrap: nowrap;
+          min-width: auto;
+        }
+        .${SCRIPT_ID}-release-native-meta {
+          flex: 0 0 auto;
+          width: 100%;
+        }
+        .${SCRIPT_ID}-release-tools-host > .${SCRIPT_ID}-release-tools {
+          display: flex;
+          justify-content: flex-start;
+          flex: 0 0 auto;
+          flex-wrap: nowrap;
+          width: 100%;
+          max-width: 100%;
+          margin: 4px 0 0;
+          overflow-x: auto;
+          overflow-y: hidden;
+          scrollbar-width: none;
+        }
+        .${SCRIPT_ID}-release-tools-host > .${SCRIPT_ID}-release-tools::-webkit-scrollbar {
+          display: none;
+        }
+        .${SCRIPT_ID}-release-tools .${SCRIPT_ID}-fast-link {
+          flex: 0 0 auto;
+        }
+      }
+      @media (max-width: 755px) {
+        .${SCRIPT_ID}-release-fast,
+        .${SCRIPT_ID}-release-original {
+          max-width: calc(50vw - 24px);
+        }
+        .${SCRIPT_ID}-fast-raw {
+          max-width: 84px;
+          padding-right: 7px !important;
+          padding-left: 7px !important;
+        }
+        .${FILE_LIST_ROW_CLASS}-file a[data-sam-file-type]::after {
+          display: none;
+        }
+        .${SCRIPT_ID}-file-metadata {
+          flex: 0 0 auto;
+          justify-content: center;
+          min-width: 126px;
+          max-width: 44vw;
+          margin-left: 4px;
+          padding-right: 6px;
+          padding-left: 6px;
+          overflow: hidden;
+          font-size: 11px;
+          text-overflow: ellipsis;
+        }
       }
       .${SCRIPT_ID}-toast {
         position: fixed;
@@ -32492,12 +33258,16 @@
 
     let lastUrl = location.href;
     let enhanceTimer = 0;
-    const scheduleEnhancements = () => {
+    const scheduleEnhancements = (delay = 180) => {
       window.clearTimeout(enhanceTimer);
       enhanceTimer = window.setTimeout(() => {
+        if (isGitHubSearchUiActive()) {
+          scheduleEnhancements(SEARCH_INTERACTION_HOLD_MS + 80);
+          return;
+        }
         const ctx = getRepoContext(window.location);
         if (ctx) ensurePageEnhancements(ctx);
-      }, 180);
+      }, delay);
     };
 
     const rerender = () => {
@@ -32506,7 +33276,7 @@
         return;
       }
       lastUrl = location.href;
-      window.setTimeout(renderAssistant, 160);
+      window.setTimeout(renderAssistant, RENDER_DELAY_NORMAL_MS);
     };
 
     const observer = new MutationObserver(rerender);
@@ -32517,38 +33287,21 @@
     });
     window.addEventListener('turbo:render', () => {
       lastUrl = '';
-      window.setTimeout(renderAssistant, 80);
+      window.setTimeout(renderAssistant, RENDER_DELAY_FAST_MS);
     });
   }
 
-  globalThis.__SAM_GITHUB_ASSISTANT_CORE__ = {
+  // Only expose essential public APIs - freeze to prevent modification
+  globalThis.__SAM_GITHUB_ASSISTANT_CORE__ = Object.freeze({
+    version: '1.1.0',
+    // Public utility functions
     getRepoContext,
-    buildQuickLinks,
     buildMirrorUrl,
     buildAcceleratedUrl,
-    buildRawUrlFromBlobHref,
-    buildFastRawUrlFromBlobHref,
-    buildSsh443CloneUrl,
-    buildGitHubRepoApiUrl,
-    buildGitHubTreeApiUrl,
-    buildGitHubContentsApiUrl,
-    buildGitHubReleasesApiUrl,
     formatBytes,
     formatRepoSize,
-    formatMirrorSpeed,
-    calculateDirectorySizeFromTree,
-    flattenReleaseAssets,
-    isMultiLangReadmeFilename,
-    parseReadmeArticleHtml,
-    parseMirrorNodesFromText,
-    extractChunkUrls,
-    requestText,
-    requestJson,
-    getRateLimitKind,
-    readGitHubApiBackoff,
-    trimSlashes,
-    translateGitHubText,
-  };
+    // Internal functions are not exposed for security reasons
+  });
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', install, { once: true });
