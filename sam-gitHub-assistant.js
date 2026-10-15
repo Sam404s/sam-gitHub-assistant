@@ -2,9 +2,9 @@
 // @name         Sam GitHub Assistant
 // @name:zh-CN   Sam 的 GitHub 个人助手
 // @namespace    https://github.com/Sam404s/sam-gitHub-assistant
-// @version      1.1.0
-// @description  Personal GitHub helper: Chinese localization, repo/file/folder/release sizes and counts, styled file lists, high-speed clone/raw/release/ZIP links, quick repo links, active forks, and in-place multilingual README switching.
-// @description:zh-CN  个人 GitHub 助手：GitHub 中文化、仓库/文件/文件夹/Release 大小与数量、文件列表美化、高速 Clone/Raw/Release/ZIP 链接、仓库快捷入口、活跃 Forks 查询、多语言 README 原地切换。
+// @version      1.2.0
+// @description  Personal GitHub helper: Chinese localization, localized timestamps, repo/file/folder/release sizes and counts, styled file lists, high-speed clone/raw/release/ZIP links, quick repo links, active forks, code-search star/date sorting, and in-place multilingual README switching.
+// @description:zh-CN  个人 GitHub 助手：GitHub 中文化、时间中文化、仓库/文件/文件夹/Release 大小与数量、文件列表美化、高速 Clone/Raw/Release/ZIP 链接、仓库快捷入口、活跃 Forks 查询、代码搜索 Star/时间排序、跨页扫描汇总、多语言 README 原地切换。
 // @author       Sam404s
 // @homepageURL  https://github.com/Sam404s/sam-gitHub-assistant
 // @supportURL   https://github.com/Sam404s/sam-gitHub-assistant/issues
@@ -21,7 +21,6 @@
 // @grant        GM_setClipboard
 // @grant        GM_xmlhttpRequest
 // @connect      *
-// @connect      github.akams.cn
 // @connect      api.github.com
 // @run-at       document-end
 // ==/UserScript==
@@ -33,29 +32,55 @@
 
   const SCRIPT_ID = 'sam-github-assistant';
   const DEFAULT_BRANCH = 'main';
-  const DEFAULT_MIRROR_HOST = 'gh.llkk.cc';
-  const MIRROR_SOURCE_URL = 'https://github.akams.cn/';
-  const MIRROR_CACHE_TTL = 12 * 60 * 60 * 1000;
+  // 内置加速源（全部为「前缀 + 原始 GitHub URL」形式）。
+  // 顺序即默认优先级；实测可用，无需运行时抓取远程列表。
+  const BUILTIN_MIRROR_HOSTS = [
+    'github.dpik.top',
+    'ghproxy.net',
+    'cdn.gh-proxy.com',
+    'down.mxw.xx.kg',
+    'github.mxw.qzz.io',
+    'gh.idayer.com',
+    'github.chenc.dev',
+  ];
+  const DEFAULT_MIRROR_HOST = BUILTIN_MIRROR_HOSTS[0];
   const MIRROR_SPEED_CACHE_TTL = 3 * 60 * 60 * 1000;
   const MIRROR_SPEED_TEST_TARGET = 'https://github.com/favicon.ico';
   const MIRROR_SPEED_TIMEOUT = 4500;
   const DIRECT_RAW_MIRROR_LIMIT = 3;
   const DIRECT_RELEASE_MIRROR_LIMIT = 4;
   const DIRECT_CODE_MIRROR_LIMIT = 3;
+  // Release 资产行的原生摘要占位宽度（GitHub 内联 max-width: 250px）。
+  // 折叠成按钮后释放出的宽度全部让给加速工具条。
+  const RELEASE_DIGEST_LABEL = 'sha256';
+  const RELEASE_DIGEST_CHIP_CLASS = `${SCRIPT_ID}-release-digest-chip`;
   const REPO_META_CACHE_TTL = 6 * 60 * 60 * 1000;
   const GITHUB_API_SECONDARY_BACKOFF_TTL = 60 * 60 * 1000;
   const GITHUB_API_RATE_LIMIT_BACKOFF_TTL = 15 * 60 * 1000;
   const ACTIVE_FORKS_URL = 'https://techgaun.github.io/active-forks/index.html#';
-  const STORAGE_COLLAPSED = 'samGithubAssistantCollapsed';
-  const STORAGE_MIRRORS = 'samGithubAssistantMirrors';
-  const STORAGE_MIRRORS_FETCHED_AT = 'samGithubAssistantMirrorsFetchedAt';
   const STORAGE_MIRROR_SPEEDS = 'samGithubAssistantMirrorSpeeds';
-  const STORAGE_SELECTED_MIRROR = 'samGithubAssistantSelectedMirror';
+  // 1.2.0 及更早遗留：远程镜像列表 / 手动选择 / 面板折叠状态。
+  // 面板与远程列表已移除，这些键在首次安装时清理一次。
+  const LEGACY_MIRROR_STORAGE_KEYS = [
+    'samGithubAssistantCollapsed',
+    'samGithubAssistantMirrors',
+    'samGithubAssistantMirrorsFetchedAt',
+    'samGithubAssistantSelectedMirror',
+  ];
   const STORAGE_REPO_META_PREFIX = 'samGithubAssistantRepoMeta:';
   const STORAGE_TREE_PREFIX = 'samGithubAssistantTree:';
   const STORAGE_RELEASES_PREFIX = 'samGithubAssistantReleases:';
   const STORAGE_API_BACKOFF_PREFIX = 'samGithubAssistantApiBackoff:';
   const STORAGE_LOCALIZATION_ENABLED = 'samGithubAssistantLocalizationEnabled';
+  const STORAGE_GITHUB_API_TOKEN = 'samGithubAssistantGitHubApiToken';
+  const STORAGE_LOCALIZED_TIME_MODE = 'samGithubAssistantLocalizedTimeMode';
+  const STORAGE_LOCALIZED_TIME_ZONE = 'samGithubAssistantLocalizedTimeZone';
+  const STORAGE_CODE_SEARCH_ENABLED = 'samGithubAssistantCodeSearchEnabled';
+  const STORAGE_CODE_SEARCH_SORT = 'samGithubAssistantCodeSearchSort';
+  const STORAGE_CODE_SEARCH_SCAN_PAGES = 'samGithubAssistantCodeSearchScanPages';
+  const STORAGE_SEARCH_REPO_STATS_PREFIX = 'samGithubAssistantSearchRepoStats:';
+  const STORAGE_SEARCH_FILE_COMMIT_PREFIX = 'samGithubAssistantSearchFileCommit:';
+  const STORAGE_MISSED_TERMS_ENABLED = 'samGithubAssistantMissedTermsEnabled';
   const GITHUB_API_BACKOFF_HOST_KEY = `${STORAGE_API_BACKOFF_PREFIX}api.github.com`;
   const REPO_SIZE_BADGE_ID = 'sam-github-repo-size-badge';
   const ITEM_SIZE_BADGE_CLASS = `${SCRIPT_ID}-item-size-badge`;
@@ -67,8 +92,69 @@
   const LOCALIZATION_FLUSH_DELAY_MS = 400;
   const LOCALIZATION_BATCH_SIZE = 120;
   const LOCALIZATION_BATCH_TIME_MS = 8;
-  const FALLBACK_MIRROR_NODES = [{ label: 'default', value: DEFAULT_MIRROR_HOST }];
-  let mirrorNodes = FALLBACK_MIRROR_NODES.slice();
+  const LOCALIZATION_MISSED_TERM_LIMIT = 400;
+
+  // API token: authenticated requests get 5000 req/h instead of 60 req/h, so a
+  // rate-limit backoff no longer needs to be as pessimistic.
+  const GITHUB_API_TOKEN_GRANTED_HEADER = 'Authorization';
+  const GITHUB_API_TOKEN_BACKOFF_FACTOR = 0.34;
+
+  // Localized timestamps: GitHub ships two datetime shapes, both normalized to ISO.
+  const LOCALIZED_TIME_SELECTOR = 'relative-time[datetime], local-time[datetime], time[datetime]';
+  const LOCALIZED_TIME_REFRESH_MS = 30000;
+  const LOCALIZED_TIME_SCAN_DELAY_MS = 120;
+  const LOCALIZED_TIME_MODES = [
+    { id: 'abs+rel', label: '绝对 + 相对（2026年9月30日 10:40（6天前））' },
+    { id: 'abs', label: '仅绝对（2026年9月30日 10:40）' },
+    { id: 'rel', label: '仅相对（6天前）' },
+    { id: 'off', label: '关闭（保留 GitHub 原样）' },
+  ];
+  const LOCALIZED_TIME_DEFAULT_MODE = 'abs+rel';
+  // 旁挂 span 必须和它替换掉的原生元素「看起来一模一样」。
+  // GitHub 常把字号/颜色直接写在 relative-time 自身（color-fg-muted、fz-12 之类），
+  // 只写 color/font: inherit 拿到的是父级的值，于是中文时间比周围原生时间更粗更重。
+  const LOCALIZED_TIME_STYLE_PROPS = [
+    'color',
+    'font-family',
+    'font-size',
+    'font-weight',
+    'font-style',
+    'line-height',
+    'letter-spacing',
+    'font-variant-numeric',
+    'font-feature-settings',
+    'text-transform',
+    'opacity',
+    'vertical-align',
+  ];
+  // 连续 DOM 变更时的扫描退避上限（见 scheduleLocalizedTimeScan）
+  const LOCALIZED_TIME_SCAN_BACKOFF_MAX_MS = 2000;
+  // 主题切换会换掉 CSS 变量，内联复制的字色需要重新采样
+  const LOCALIZED_TIME_THEME_ATTRIBUTES = ['data-color-mode', 'data-dark-theme', 'data-light-theme'];
+
+  // Code search enhancement: GitHub renders each hit inside a codeResultWrapper cell.
+  const CODE_SEARCH_ITEM_SELECTOR = 'div[class*="codeResultWrapper"]';
+  const CODE_SEARCH_LIST_SELECTOR = '[data-testid="results-list"]';
+  const CODE_SEARCH_BADGE_CLASS = `${SCRIPT_ID}-cs-badge`;
+  const CODE_SEARCH_SORT_BAR_CLASS = `${SCRIPT_ID}-cs-sortbar`;
+  const CODE_SEARCH_PANEL_ID = `${SCRIPT_ID}-cs-panel`;
+  const CODE_SEARCH_STATS_TTL = 6 * 60 * 60 * 1000;
+  const CODE_SEARCH_COMMIT_TTL = 6 * 60 * 60 * 1000;
+  const CODE_SEARCH_FETCH_CONCURRENCY = 4;
+  const CODE_SEARCH_SCAN_CONCURRENCY = 4;
+  const CODE_SEARCH_FAIL_BACKOFF_MS = 60000;
+  const CODE_SEARCH_RESCAN_THROTTLE_MS = 500;
+  const CODE_SEARCH_OBSERVE_DELAY_MS = 700;
+  const CODE_SEARCH_SCAN_PAGE_LIMIT = 20;
+  const CODE_SEARCH_SCAN_DEFAULT_PAGES = 3;
+  const CODE_SEARCH_PAGE_TIMEOUT_MS = 20000;
+  const CODE_SEARCH_RESERVED_PATHS = new Set([
+    'search', 'settings', 'login', 'signup', 'logout', 'notifications', 'explore',
+    'topics', 'trending', 'sponsors', 'marketplace', 'orgs', 'users', 'apps',
+    'features', 'pricing', 'about', 'contact', 'security', 'enterprise',
+    'collections', 'events', 'new', 'issues', 'pulls', 'codespaces', 'discussions',
+  ]);
+  const mirrorNodes = BUILTIN_MIRROR_HOSTS.map((host, index) => ({ label: host, value: host, index }));
   let selectedMirrorHost = DEFAULT_MIRROR_HOST;
   const repoMetaByPath = new Map();
   const repoMetaRequests = new Map();
@@ -79,7 +165,7 @@
   const apiBackoffsByKey = new Map();
   const mirrorSpeedByHost = new Map();
   const mirrorSpeedRequests = new Set();
-  let assistantRenderTimer = 0;
+  let legacyMirrorStorageCleared = false;
   let readmeOriginalWrapper = null;
   let readmeReplacement = null;
   let readmeSwitcherInstalled = false;
@@ -90,7 +176,51 @@
   let searchResumeTimer = 0;
   const localizationQueue = [];
   const localizationQueuedNodes = new WeakSet();
+  // 已本地化过属性的元素。框架回写属性时不再跟随重写，杜绝自触发的属性循环。
+  const localizedAttributeNodes = new WeakSet();
+  const missedLocalizationTerms = new Map();
   let githubChineseI18NCache = null;
+
+  // Localized timestamp takeover
+  let localizedTimeInstalled = false;
+  let localizedTimeScanTimer = 0;
+  let localizedTimeRefreshTimer = 0;
+  let localizedTimeFormatterZone = null;
+  let localizedTimeAbsoluteFormatter = null;
+  let localizedTimeTitleFormatter = null;
+  let localizedTimeRelativeFormatter = null;
+  let localizedTimeScanDelay = LOCALIZED_TIME_SCAN_DELAY_MS;
+  let localizedTimeLastScanAt = 0;
+  let localizedTimeDirty = false;
+  // 递增即表示「所有已采样样式作废」，paint 时会重新 getComputedStyle 一次
+  let localizedTimeStyleEpoch = 0;
+  let localizedTimeDomObserver = null;
+  let localizedTimeThemeObserver = null;
+  const localizedTimeRegistry = [];
+
+  // Code search enhancement
+  let codeSearchInstalled = false;
+  let codeSearchObserver = null;
+  let codeSearchObserveTimer = 0;
+  let codeSearchAnnotateRunning = false;
+  let codeSearchAnnotateQueued = false;
+  let codeSearchSortTimer = 0;
+  let codeSearchDataVersion = 0;
+  let codeSearchSortedVersion = -1;
+  let codeSearchSortField = '';
+  let codeSearchSortAsc = false;
+  let codeSearchScanBusy = false;
+  let codeSearchScanRows = [];
+  let codeSearchScanStats = [];
+  let codeSearchScanUserClosed = false;
+  let codeSearchScanRenderTimer = 0;
+  let codeSearchScanRenderQueued = false;
+  const codeSearchOriginalOrder = new WeakMap();
+  const codeSearchFailedAt = new Map();
+  const codeSearchInFlightRepos = new Set();
+  const codeSearchInFlightFiles = new Set();
+  let codeSearchScanSortField = 'fileUpdated';
+  let codeSearchScanSortAsc = false;
 
   const LOCALIZATION_STATIC_TEXT = Object.freeze({
     'Code': '代码',
@@ -29472,14 +29602,19 @@
   }
 
   function getRepoContext(inputUrl) {
-    // Input validation
-    if (!inputUrl || (typeof inputUrl !== 'string' && !(inputUrl instanceof URL))) {
+    // window.location 是 Location，不是 URL 的实例（Location 与 URL 无继承关系），
+    // 所以这里不能依赖 instanceof URL，否则真实浏览器里永远拿不到上下文。
+    // 统一按 href 取值：Location / URL / 字符串都能覆盖。
+    const href = typeof inputUrl === 'string'
+      ? inputUrl
+      : (inputUrl && typeof inputUrl.href === 'string' ? inputUrl.href : '');
+    if (!href) {
       console.warn('[Sam GitHub Assistant] Invalid URL input:', inputUrl);
       return null;
     }
 
     try {
-      const url = inputUrl instanceof URL ? inputUrl : new URL(String(inputUrl), window.location.origin);
+      const url = new URL(href, window.location.origin);
       if (url.hostname !== 'github.com') return null;
 
     const parts = url.pathname.split('/').filter(Boolean);
@@ -29660,41 +29795,6 @@
     return assetsByKey;
   }
 
-  function uniqMirrorNodes(nodes) {
-    const seen = new Set();
-    return nodes.filter((node) => {
-      const value = normalizeMirrorHost(node && node.value);
-      if (!value || seen.has(value)) return false;
-      seen.add(value);
-      node.value = value;
-      node.label = node.label || 'contribute';
-      return true;
-    });
-  }
-
-  function parseMirrorNodesFromText(text) {
-    const nodes = [];
-    const pattern = /\{\s*label\s*:\s*"([^"]+)"\s*,\s*value\s*:\s*"([^"]+)"\s*\}/g;
-    let match;
-    while ((match = pattern.exec(String(text || ''))) !== null) {
-      nodes.push({ label: match[1], value: match[2] });
-    }
-    return uniqMirrorNodes(nodes);
-  }
-
-  function extractChunkUrls(html) {
-    const urls = [];
-    const seen = new Set();
-    const pattern = /["'](\/_next\/static\/chunks\/[^"']+\.js)["']/g;
-    let match;
-    while ((match = pattern.exec(String(html || ''))) !== null) {
-      if (seen.has(match[1])) continue;
-      seen.add(match[1]);
-      urls.push(new URL(match[1], MIRROR_SOURCE_URL).href);
-    }
-    return urls;
-  }
-
   function buildQuickLinks(ctx, mirrorHost = selectedMirrorHost) {
     if (ctx.pageType === 'home') {
       return {
@@ -29710,7 +29810,7 @@
         notifications: 'https://github.com/notifications',
         explore: 'https://github.com/explore',
         stars: 'https://github.com/stars',
-        proxyHome: MIRROR_SOURCE_URL,
+        proxyHome: `https://${DEFAULT_MIRROR_HOST}/`,
         fastZip: '',
         raw: '',
         fastRaw: '',
@@ -30023,6 +30123,31 @@
     return '';
   }
 
+  function isMissedTermsEnabled() {
+    return readStringStorage(STORAGE_MISSED_TERMS_ENABLED, 'false') === 'true';
+  }
+
+  function recordMissedLocalizationTerm(key) {
+    if (!isMissedTermsEnabled() || typeof key !== 'string' || !key) return;
+    missedLocalizationTerms.set(key, (missedLocalizationTerms.get(key) || 0) + 1);
+    if (missedLocalizationTerms.size > LOCALIZATION_MISSED_TERM_LIMIT) {
+      const oldest = missedLocalizationTerms.keys().next().value;
+      if (oldest !== undefined) missedLocalizationTerms.delete(oldest);
+    }
+  }
+
+  function dumpMissedLocalizationTerms() {
+    if (!missedLocalizationTerms.size) {
+      toast('暂无未命中词条');
+      return;
+    }
+    const lines = Array.from(missedLocalizationTerms.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([key, count]) => `${count}\t${key}`);
+    console.info('[Sam GitHub Assistant] 未命中词条（次数\t原文）：\n' + lines.join('\n'));
+    toast(`已输出 ${lines.length} 条未命中词条到控制台`);
+  }
+
   function translateGitHubText(text) {
     if (typeof text !== 'string') return '';
     if (!text.trim() || !/[A-Za-z]/.test(text)) return '';
@@ -30041,7 +30166,10 @@
       }
     }
 
-    if (!translated || translated === neatKey) return '';
+    if (!translated || translated === neatKey) {
+      recordMissedLocalizationTerm(neatKey);
+      return '';
+    }
     translated = translated
       .replace(/\b(second|minute|hour|day|week|month|year)\b/gi, (unit) => translateGitHubTimeUnit(unit));
     return text.replace(key, translated);
@@ -30224,14 +30352,22 @@
     const translated = translateGitHubText(value);
     if (!translated) return;
     if (isAttribute && typeof node.setAttribute === 'function') {
+      // 已经与目标值相同就不要再写：重写同值属性同样会派发 MutationRecord，
+      // 在 React / Turbo 反复回写该属性的场景下会演变成属性ping-pong（主线程被打满）。
+      if (node.getAttribute(field) === translated) return;
       node.setAttribute(field, translated);
       return;
     }
+    if (node[field] === translated) return;
     node[field] = translated;
   }
 
   function localizeElementAttributes(node) {
     if (!node || !node.tagName) return;
+    // 同一元素只本地化一次属性。搜索框这类受控组件在聚焦/输入时会被框架回写
+    // placeholder，若我们跟随重写就会形成自触发的属性循环，导致页面卡死。
+    if (localizedAttributeNodes.has(node)) return;
+    localizedAttributeNodes.add(node);
     ['title', 'aria-label', 'data-confirm', 'data-confirm-text', 'data-disable-with'].forEach((attr) => {
       if (typeof node.getAttribute === 'function' && node.getAttribute(attr)) {
         localizeTextField(node, attr, true);
@@ -30282,10 +30418,6 @@
     const startedAt = Date.now();
     let processed = 0;
     while (localizationQueue.length && processed < LOCALIZATION_BATCH_SIZE && Date.now() - startedAt < LOCALIZATION_BATCH_TIME_MS) {
-      if (isGitHubSearchUiActive()) {
-        discardLocalizationQueue();
-        return;
-      }
       const node = localizationQueue.shift();
       if (node && typeof node === 'object') localizationQueuedNodes.delete(node);
       if (!isIgnoredLocalizationNode(node)) localizeNode(node);
@@ -30364,7 +30496,11 @@
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['title', 'aria-label', 'placeholder', 'value', 'data-confirm', 'data-confirm-text', 'data-disable-with'],
+      // 刻意不监听 placeholder / value：这两个是表单控件的受控属性，
+      // GitHub 的 React / QueryBuilder 会在聚焦与输入时反复回写它们，
+      // 一旦跟随重写就会形成"我们写→框架回写→再触发我们"的死循环，
+      // 表现为顶部搜索栏一点击就出现遮罩且整页无法操作。
+      attributeFilter: ['title', 'aria-label', 'data-confirm', 'data-confirm-text', 'data-disable-with'],
     });
 
     // Freeze before React starts mounting QueryBuilder. Pointer/focus events fire
@@ -30395,9 +30531,1107 @@
     window.addEventListener('turbo:load', () => scheduleLocalization(160));
   }
 
-  function getSelectedMirrorNode() {
-    return mirrorNodes.find((node) => node.value === selectedMirrorHost)
-      || { label: 'default', value: selectedMirrorHost };
+  /* ---------------------------------------------------------------------------
+   * Localized timestamps — 把 GitHub 的 relative-time / local-time 改写成中文
+   * （参考 .tmp/GitHub Releases · 中文时间：四模式 + 自定义时区 + 定期刷新）
+   * 主开关跟随中文化，自身另有 abs+rel / abs / rel / off 四档。
+   * ------------------------------------------------------------------------- */
+
+  function getLocalizedTimeMode() {
+    const stored = readStringStorage(STORAGE_LOCALIZED_TIME_MODE, LOCALIZED_TIME_DEFAULT_MODE);
+    return LOCALIZED_TIME_MODES.some((m) => m.id === stored) ? stored : LOCALIZED_TIME_DEFAULT_MODE;
+  }
+
+  function setLocalizedTimeMode(mode) {
+    writeStringStorage(STORAGE_LOCALIZED_TIME_MODE, mode);
+  }
+
+  function getLocalizedTimeZone() {
+    return readStringStorage(STORAGE_LOCALIZED_TIME_ZONE, '') || undefined;
+  }
+
+  function setLocalizedTimeZone(zone) {
+    writeStringStorage(STORAGE_LOCALIZED_TIME_ZONE, String(zone || '').trim());
+  }
+
+  function ensureLocalizedTimeFormatters() {
+    const zone = getLocalizedTimeZone();
+    if (localizedTimeFormatterZone === zone && localizedTimeAbsoluteFormatter) return;
+    localizedTimeFormatterZone = zone;
+    localizedTimeAbsoluteFormatter = new Intl.DateTimeFormat('zh-CN', {
+      year: 'numeric', month: 'long', day: 'numeric',
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: zone,
+    });
+    // dateStyle/timeStyle 不能与 timeZoneName 混用，所以逐字段写全
+    localizedTimeTitleFormatter = new Intl.DateTimeFormat('zh-CN', {
+      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hourCycle: 'h23', timeZoneName: 'short', timeZone: zone,
+    });
+    localizedTimeRelativeFormatter = new Intl.RelativeTimeFormat('zh-CN', { numeric: 'auto' });
+  }
+
+  // GitHub 的 datetime 有两种写法：ISO (…Z) 与 “YYYY-MM-DD HH:mm:ss UTC”，统一补成 ISO-8601。
+  function parseGitHubDateTime(raw) {
+    if (!raw) return null;
+    let value = String(raw).trim();
+    if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}( UTC)?$/.test(value)) {
+      value = value.slice(0, 19).replace(' ', 'T') + 'Z';
+    }
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  function formatLocalizedRelativeTime(date) {
+    const seconds = (date.getTime() - Date.now()) / 1000;
+    const abs = Math.abs(seconds);
+    if (abs < 60) return '刚刚';
+    if (abs < 3600) return localizedTimeRelativeFormatter.format(Math.round(seconds / 60), 'minute');
+    if (abs < 86400) return localizedTimeRelativeFormatter.format(Math.round(seconds / 3600), 'hour');
+    if (abs < 2592000) return localizedTimeRelativeFormatter.format(Math.round(seconds / 86400), 'day');
+    if (abs < 31536000) return localizedTimeRelativeFormatter.format(Math.round(seconds / 2592000), 'month');
+    return localizedTimeRelativeFormatter.format(Math.round(seconds / 31536000), 'year');
+  }
+
+  function teardownLocalizedTime(el) {
+    el.style.removeProperty('display');
+    if (el.__samLocalizedTimeSpan) {
+      el.__samLocalizedTimeSpan.remove();
+      el.__samLocalizedTimeSpan = null;
+    }
+    el.__samLocalizedTimeStyle = null;
+    delete el.dataset.samLocalizedTime;
+    delete el.__samLocalizedTimeDate;
+  }
+
+  // 采样宿主自身的排版与字色。写在 relative-time 身上的 font-size / color-fg-muted
+  // 不会被子元素 inherit 到，所以必须显式取 computed style 再贴给旁挂 span。
+  function captureLocalizedTimeHostStyle(el) {
+    if (!el || typeof window.getComputedStyle !== 'function') return '';
+    let cs = null;
+    try {
+      cs = window.getComputedStyle(el);
+    } catch (_) {
+      cs = null;
+    }
+    if (!cs || typeof cs.getPropertyValue !== 'function') return '';
+    const parts = [];
+    for (let i = 0; i < LOCALIZED_TIME_STYLE_PROPS.length; i++) {
+      const prop = LOCALIZED_TIME_STYLE_PROPS[i];
+      let value = '';
+      try {
+        value = cs.getPropertyValue(prop);
+      } catch (_) {
+        value = '';
+      }
+      value = value ? String(value).trim() : '';
+      if (!value) continue;
+      parts.push(`${prop}:${value}`);
+    }
+    return parts.join(';');
+  }
+
+  function resolveLocalizedTimeHostStyle(el) {
+    const cached = el.__samLocalizedTimeStyle;
+    if (cached && cached.epoch === localizedTimeStyleEpoch) return cached.css;
+    const css = captureLocalizedTimeHostStyle(el);
+    el.__samLocalizedTimeStyle = { epoch: localizedTimeStyleEpoch, css };
+    return css;
+  }
+
+  function paintLocalizedTime(el) {
+    const date = el.__samLocalizedTimeDate;
+    if (!date) return;
+    ensureLocalizedTimeFormatters();
+
+    let span = el.__samLocalizedTimeSpan;
+    if (!span || !span.isConnected) {
+      if (!el.parentNode) return;
+      span = document.createElement('span');
+      span.className = `${SCRIPT_ID}-localized-time`;
+      el.parentNode.insertBefore(span, el.nextSibling);
+      el.__samLocalizedTimeSpan = span;
+      el.__samLocalizedTimeStyle = null;
+      span.__samStyleCss = null;
+    }
+
+    // 先把宿主的排版/字色采下来，再隐藏它。
+    // 只靠 CSS 的 color/font: inherit 拿不到写在宿主元素自身上的字号与弱化字色，
+    // 那正是中文时间比周围原生时间「更重」的原因。
+    const hostStyle = resolveLocalizedTimeHostStyle(el);
+    if (span.__samStyleCss !== hostStyle) {
+      span.__samStyleCss = hostStyle;
+      span.style.cssText = hostStyle ? `${hostStyle};white-space:nowrap` : 'white-space:nowrap';
+    }
+
+    // GitHub 的 React 组件会重写自身文本，藏掉原元素最稳，中文由旁挂 span 呈现
+    if (el.style.display !== 'none') el.style.setProperty('display', 'none', 'important');
+
+    const mode = getLocalizedTimeMode();
+    const abs = localizedTimeAbsoluteFormatter.format(date);
+    let text;
+    if (mode === 'abs') text = abs;
+    else if (mode === 'rel') text = formatLocalizedRelativeTime(date);
+    else text = `${abs}（${formatLocalizedRelativeTime(date)}）`;
+
+    if (span.textContent !== text) span.textContent = text;
+    span.title = localizedTimeTitleFormatter.format(date);
+  }
+
+  function takeoverLocalizedTime(el) {
+    if (!el || !el.dataset || !el.getAttribute || !el.getAttribute('datetime')) return;
+    if (isInsideAssistant(el) || isIgnoredLocalizationNode(el)) return;
+    if (el.dataset.samLocalizedTime) {
+      paintLocalizedTime(el);
+      return;
+    }
+    const date = parseGitHubDateTime(el.getAttribute('datetime'));
+    if (!date) return;
+    el.dataset.samLocalizedTime = '1';
+    el.__samLocalizedTimeDate = date;
+    localizedTimeRegistry.push(el);
+    paintLocalizedTime(el);
+  }
+
+  function scanLocalizedTimes(root) {
+    if (!root || !root.querySelectorAll) return;
+    if (!isLocalizationEnabled() || getLocalizedTimeMode() === 'off') return;
+    if (isGitHubSearchUiActive()) return;
+    const list = root.querySelectorAll(LOCALIZED_TIME_SELECTOR);
+    for (let i = 0; i < list.length; i++) {
+      try {
+        takeoverLocalizedTime(list[i]);
+      } catch (_) {
+        // 单个异常节点不能中断整轮扫描
+      }
+    }
+  }
+
+  function refreshLocalizedTimes() {
+    for (let i = localizedTimeRegistry.length - 1; i >= 0; i--) {
+      const el = localizedTimeRegistry[i];
+      if (!el.isConnected) {
+        localizedTimeRegistry.splice(i, 1);
+        continue;
+      }
+      try {
+        paintLocalizedTime(el);
+      } catch (_) {
+        // noop
+      }
+    }
+  }
+
+  function teardownLocalizedTimes() {
+    while (localizedTimeRegistry.length) {
+      const el = localizedTimeRegistry.pop();
+      if (el && el.isConnected) teardownLocalizedTime(el);
+    }
+  }
+
+  function scheduleLocalizedTimeScan(delay = LOCALIZED_TIME_SCAN_DELAY_MS) {
+    // 刻意「不重置」已挂起的定时器。GitHub 是 React 应用，DOM 变更几乎持续不断，
+    // 若按 debounce 处理，首轮扫描会被无限推迟（用户感受就是「要等好久才变中文」）。
+    // 改成节流：保证每 delay 至少跑一轮，最迟 delay 内一定有结果。
+    if (localizedTimeScanTimer) return;
+    localizedTimeScanTimer = window.setTimeout(() => {
+      localizedTimeScanTimer = 0;
+      // 持续变更时逐步退避到 LOCALIZED_TIME_SCAN_BACKOFF_MAX_MS，
+      // 避免长驻页面上每 120ms 做一次全文档查询。
+      const now = Date.now();
+      if (localizedTimeLastScanAt && now - localizedTimeLastScanAt < LOCALIZED_TIME_SCAN_DELAY_MS * 3) {
+        localizedTimeScanDelay = Math.min(localizedTimeScanDelay * 2, LOCALIZED_TIME_SCAN_BACKOFF_MAX_MS);
+      } else {
+        localizedTimeScanDelay = LOCALIZED_TIME_SCAN_DELAY_MS;
+      }
+      localizedTimeLastScanAt = now;
+      localizedTimeDirty = false;
+      scanLocalizedTimes(document.body);
+      // 仅当「上一轮扫描之后又发生了 DOM 变更」才排下一轮，
+      // 否则安静页面上会留下一个永不停止的轮询。
+      if (localizedTimeDirty) scheduleLocalizedTimeScan(localizedTimeScanDelay);
+    }, delay);
+  }
+
+  function installLocalizedTimes() {
+    if (localizedTimeInstalled) return;
+    localizedTimeInstalled = true;
+
+    // 首轮同步扫描：install() 在 document-end 运行，body 已就绪，无需空等一个定时器
+    scanLocalizedTimes(document.body);
+
+    if (localizedTimeDomObserver) localizedTimeDomObserver.disconnect();
+    localizedTimeDomObserver = new MutationObserver(() => {
+      localizedTimeDirty = true;
+      scheduleLocalizedTimeScan();
+    });
+    localizedTimeDomObserver.observe(document.documentElement, { childList: true, subtree: true });
+
+    // 主题切换会替换 CSS 变量，之前内联复制的字色会失配，必须重新采样
+    if (localizedTimeThemeObserver) localizedTimeThemeObserver.disconnect();
+    localizedTimeThemeObserver = new MutationObserver(() => {
+      localizedTimeStyleEpoch++;
+      refreshLocalizedTimes();
+    });
+    localizedTimeThemeObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: LOCALIZED_TIME_THEME_ATTRIBUTES,
+    });
+
+    // “N天前”会随时间变化，定期重算；同时兜底一次样式重采样
+    window.clearInterval(localizedTimeRefreshTimer);
+    localizedTimeRefreshTimer = window.setInterval(() => {
+      if (!isLocalizationEnabled() || getLocalizedTimeMode() === 'off') return;
+      localizedTimeStyleEpoch++;
+      refreshLocalizedTimes();
+      scanLocalizedTimes(document.body);
+    }, LOCALIZED_TIME_REFRESH_MS);
+  }
+
+  function reapplyLocalizedTimes() {
+    const mode = getLocalizedTimeMode();
+    if (!isLocalizationEnabled() || mode === 'off') {
+      teardownLocalizedTimes();
+      return;
+    }
+    localizedTimeStyleEpoch++;
+    scanLocalizedTimes(document.body);
+    refreshLocalizedTimes();
+  }
+
+  /* ---------------------------------------------------------------------------
+   * Code search enhancement — 搜索结果行注入 Star / 文件更新 / 仓库更新，
+   * 支持按这三个维度排序，并可跨页扫描汇总。
+   * （参考 .tmp/GitHub 代码搜索 Star & 更新时间排序助手）
+   * 数据走现有 requestJson + API 退避，Token 生效时自动享受 5000/h 配额。
+   * ------------------------------------------------------------------------- */
+
+  function isCodeSearchPage() {
+    if (!/\/search/.test(window.location.pathname || '')) return false;
+    const params = new URLSearchParams(window.location.search || '');
+    const type = params.get('type');
+    if (type === 'code') return true;
+    // 未显式指定 type 时，以 DOM 是否渲染了代码结果项为准
+    if (type) return false;
+    return Boolean(document && document.querySelector(CODE_SEARCH_ITEM_SELECTOR));
+  }
+
+  function isCodeSearchEnabled() {
+    return readStringStorage(STORAGE_CODE_SEARCH_ENABLED, 'true') !== 'false';
+  }
+
+  function setCodeSearchEnabled(enabled) {
+    writeStringStorage(STORAGE_CODE_SEARCH_ENABLED, enabled ? 'true' : 'false');
+  }
+
+  function getCodeSearchScanPages() {
+    const stored = Number.parseInt(readStringStorage(STORAGE_CODE_SEARCH_SCAN_PAGES, String(CODE_SEARCH_SCAN_DEFAULT_PAGES)), 10);
+    return Number.isFinite(stored) ? Math.max(1, Math.min(CODE_SEARCH_SCAN_PAGE_LIMIT, stored)) : CODE_SEARCH_SCAN_DEFAULT_PAGES;
+  }
+
+  function escapeHtmlContent(value) {
+    if (value == null) return '';
+    return String(value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function formatCompactStars(count) {
+    if (count == null) return 'N/A';
+    if (Number(count) >= 1000) {
+      return `${(Number(count) / 1000).toFixed(1).replace(/\.0$/, '')}k`;
+    }
+    return String(count);
+  }
+
+  function formatCompactDate(isoString) {
+    if (!isoString) return 'N/A';
+    const date = new Date(isoString);
+    if (Number.isNaN(date.getTime())) return 'N/A';
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+
+  function extractSearchRepoPath(item) {
+    for (const link of item.querySelectorAll('a[href]')) {
+      const href = link.getAttribute('href') || '';
+      if (!href || href.startsWith('http')) continue;
+      const match = href.match(/^\/([^/]+)\/([^/]+)\/(?:blob|tree)\//);
+      if (match) return `${match[1]}/${match[2]}`;
+    }
+    for (const link of item.querySelectorAll('a[href]')) {
+      const href = link.getAttribute('href') || '';
+      if (!href || href.startsWith('http')) continue;
+      const match = href.match(/^\/([^/]+)\/([^/]+)\/?$/);
+      if (!match) continue;
+      const owner = match[1];
+      if (CODE_SEARCH_RESERVED_PATHS.has(owner.toLowerCase())) continue;
+      if (owner.startsWith('.')) continue;
+      return `${owner}/${match[2]}`;
+    }
+    return '';
+  }
+
+  function extractSearchFilePath(item) {
+    for (const link of item.querySelectorAll('a[href]')) {
+      const href = link.getAttribute('href') || '';
+      const match = href.match(/^\/([^/]+)\/([^/]+)\/blob\/[^/]+\/([^?#]+)/);
+      if (match) {
+        try {
+          return decodeURIComponent(match[3]);
+        } catch (_) {
+          return match[3];
+        }
+      }
+    }
+    return '';
+  }
+
+  function extractSearchLineRange(item) {
+    for (const link of item.querySelectorAll('a[href]')) {
+      const href = link.getAttribute('href') || '';
+      if (!/^\/([^/]+)\/([^/]+)\/blob\//.test(href)) continue;
+      const match = href.match(/#L(\d+)(?:-L(\d+))?$/);
+      if (match) {
+        return { start: Number(match[1]), end: match[2] ? Number(match[2]) : null };
+      }
+    }
+    return null;
+  }
+
+  function findSearchBadgeHost(item) {
+    for (const el of item.querySelectorAll('div')) {
+      if (/headerBar/i.test(getNodeClassName(el))) return el;
+    }
+    for (const el of item.children) {
+      if (el && el.nodeType === 1) return el;
+    }
+    return item;
+  }
+
+  function ensureCodeSearchBadge(item) {
+    if (!item || typeof item.querySelector !== 'function') return null;
+    const existing = item.querySelector(`.${CODE_SEARCH_BADGE_CLASS}`);
+    if (existing) return existing;
+
+    const host = findSearchBadgeHost(item);
+    const position = window.getComputedStyle(host).position;
+    if (position === 'static' || position === '') {
+      host.style.setProperty('position', 'relative', 'important');
+    }
+    if (!host.dataset.csBadgePadded) {
+      const paddingRight = Number.parseInt(window.getComputedStyle(host).paddingRight, 10) || 0;
+      if (paddingRight < 150) {
+        host.style.setProperty('padding-right', '150px', 'important');
+      }
+      host.dataset.csBadgePadded = '1';
+    }
+
+    const badge = document.createElement('span');
+    badge.className = CODE_SEARCH_BADGE_CLASS;
+    badge.innerHTML =
+      '<span class="cs-metric" data-kind="stars" title="Star 数">⭐ …</span>' +
+      '<span class="cs-metric" data-kind="file" title="文件最后更新">📄 …</span>' +
+      '<span class="cs-metric" data-kind="repo" title="仓库最后更新" style="display:none;">🕒 …</span>';
+    host.appendChild(badge);
+    return badge;
+  }
+
+  function setCodeSearchBadgeRepo(item, stats) {
+    const badge = ensureCodeSearchBadge(item);
+    if (!badge) return;
+    const stars = badge.querySelector('.cs-metric[data-kind="stars"]');
+    const repo = badge.querySelector('.cs-metric[data-kind="repo"]');
+    if (stars) stars.textContent = `⭐ ${formatCompactStars(stats ? stats.stars : null)}`;
+    if (repo) repo.textContent = `🕒 ${formatCompactDate(stats ? stats.updated : null)}`;
+    badge.dataset.starsReady = '1';
+    refreshCodeSearchBadgeOpacity(badge);
+  }
+
+  function setCodeSearchBadgeFile(item, date) {
+    const badge = ensureCodeSearchBadge(item);
+    if (!badge) return;
+    const file = badge.querySelector('.cs-metric[data-kind="file"]');
+    if (file) file.textContent = `📄 ${formatCompactDate(date)}`;
+    badge.dataset.fileReady = '1';
+    refreshCodeSearchBadgeOpacity(badge);
+  }
+
+  function refreshCodeSearchBadgeOpacity(badge) {
+    if (!badge) return;
+    badge.style.opacity = badge.dataset.starsReady === '1' && badge.dataset.fileReady === '1' ? '' : '0.65';
+  }
+
+  function readSearchRepoStatsCache(repoPath) {
+    const cached = readJsonStorage(`${STORAGE_SEARCH_REPO_STATS_PREFIX}${repoPath}`, null);
+    if (!cached || !cached.stars || Date.now() - Number(cached.ts) > CODE_SEARCH_STATS_TTL) return null;
+    return cached;
+  }
+
+  function readSearchFileCommitCache(repoPath, filePath) {
+    const cached = readJsonStorage(`${STORAGE_SEARCH_FILE_COMMIT_PREFIX}${repoPath}\u0000${filePath}`, null);
+    if (!cached || !cached.date || Date.now() - Number(cached.ts) > CODE_SEARCH_COMMIT_TTL) return null;
+    return cached;
+  }
+
+  function isCodeSearchBackingOff(key) {
+    const at = codeSearchFailedAt.get(key);
+    return at != null && Date.now() - at < CODE_SEARCH_FAIL_BACKOFF_MS;
+  }
+
+  async function fetchSearchRepoStats(repoPath) {
+    const cached = readSearchRepoStatsCache(repoPath);
+    if (cached) return cached;
+    if (codeSearchInFlightRepos.has(repoPath) || isCodeSearchBackingOff(repoPath)) return null;
+    codeSearchInFlightRepos.add(repoPath);
+    try {
+      const data = await requestJson(`https://api.github.com/repos/${repoPath}`);
+      const stats = { stars: data.stargazers_count, updated: data.updated_at, ts: Date.now() };
+      writeJsonStorage(`${STORAGE_SEARCH_REPO_STATS_PREFIX}${repoPath}`, stats);
+      codeSearchFailedAt.delete(repoPath);
+      return stats;
+    } catch (_) {
+      codeSearchFailedAt.set(repoPath, Date.now());
+      return null;
+    } finally {
+      codeSearchInFlightRepos.delete(repoPath);
+    }
+  }
+
+  async function fetchSearchFileCommitDate(repoPath, filePath) {
+    if (!repoPath || !filePath) return null;
+    const key = `${repoPath}\u0000${filePath}`;
+    const cached = readSearchFileCommitCache(repoPath, filePath);
+    if (cached) return cached.date;
+    if (codeSearchInFlightFiles.has(key) || isCodeSearchBackingOff(key)) return null;
+    codeSearchInFlightFiles.add(key);
+    try {
+      const data = await requestJson(`https://api.github.com/repos/${repoPath}/commits?path=${encodeURIComponent(filePath)}&per_page=1`);
+      const date = Array.isArray(data) && data.length ? ((data[0].commit || {}).committer || {}).date || null : null;
+      if (date) {
+        writeJsonStorage(`${STORAGE_SEARCH_FILE_COMMIT_PREFIX}${key}`, { date, ts: Date.now() });
+      } else {
+        codeSearchFailedAt.set(key, Date.now());
+      }
+      return date;
+    } catch (_) {
+      codeSearchFailedAt.set(key, Date.now());
+      return null;
+    } finally {
+      codeSearchInFlightFiles.delete(key);
+    }
+  }
+
+  function runCodeSearchPool(items, limit, worker, onProgress) {
+    return new Promise((resolve) => {
+      const total = items.length;
+      if (!total) return resolve();
+      let next = 0;
+      let done = 0;
+      let active = 0;
+      const launch = () => {
+        while (active < limit && next < total) {
+          const item = items[next++];
+          active += 1;
+          Promise.resolve()
+            .then(() => worker(item))
+            .catch(() => {})
+            .then(() => {
+              active -= 1;
+              done += 1;
+              if (onProgress) {
+                try { onProgress(done, total); } catch (_) { /* noop */ }
+              }
+              if (done === total) resolve();
+              else launch();
+            });
+        }
+      };
+      launch();
+    });
+  }
+
+  function scheduleCodeSearchResort() {
+    window.clearTimeout(codeSearchSortTimer);
+    codeSearchSortTimer = window.setTimeout(() => {
+      codeSearchSortTimer = 0;
+      if (codeSearchSortField && codeSearchDataVersion !== codeSearchSortedVersion) {
+        applyCodeSearchSort();
+      }
+    }, CODE_SEARCH_RESCAN_THROTTLE_MS);
+  }
+
+  async function annotateCodeSearchResults() {
+    if (codeSearchAnnotateRunning) {
+      codeSearchAnnotateQueued = true;
+      return;
+    }
+    codeSearchAnnotateRunning = true;
+    try {
+      do {
+        codeSearchAnnotateQueued = false;
+        await annotateCodeSearchOnce();
+      } while (codeSearchAnnotateQueued);
+    } finally {
+      codeSearchAnnotateRunning = false;
+    }
+  }
+
+  async function annotateCodeSearchOnce() {
+    if (!isCodeSearchPage() || !isCodeSearchEnabled()) return;
+    if (isGitHubSearchUiActive()) return;
+
+    const items = Array.from(document.querySelectorAll(CODE_SEARCH_ITEM_SELECTOR));
+    if (!items.length) return;
+
+    for (const item of items) {
+      if (!codeSearchOriginalOrder.has(item)) {
+        codeSearchOriginalOrder.set(item, codeSearchOriginalOrder.size);
+      }
+    }
+
+    const repoToItems = new Map();
+    const fileToItems = new Map();
+
+    for (const item of items) {
+      const badgeExisted = Boolean(item.querySelector(`.${CODE_SEARCH_BADGE_CLASS}`));
+      const badge = ensureCodeSearchBadge(item);
+      if (!badge) continue;
+      if (!badgeExisted) codeSearchDataVersion += 1;
+
+      const repoPath = extractSearchRepoPath(item);
+      if (!repoPath) continue;
+
+      if (badge.dataset.starsReady !== '1') {
+        if (!repoToItems.has(repoPath)) repoToItems.set(repoPath, []);
+        repoToItems.get(repoPath).push(item);
+      }
+
+      const filePath = extractSearchFilePath(item);
+      if (!filePath) {
+        if (badge.dataset.fileReady !== '1') {
+          setCodeSearchBadgeFile(item, null);
+          codeSearchDataVersion += 1;
+        }
+        continue;
+      }
+      if (badge.dataset.fileReady !== '1') {
+        const fileKey = `${repoPath}\u0000${filePath}`;
+        if (!fileToItems.has(fileKey)) fileToItems.set(fileKey, []);
+        fileToItems.get(fileKey).push(item);
+      }
+    }
+
+    ensureCodeSearchSortBar();
+    refreshCodeSearchBadgeMode();
+
+    const tasks = [];
+    repoToItems.forEach((els, repoPath) => {
+      tasks.push(async () => {
+        const stats = await fetchSearchRepoStats(repoPath);
+        els.forEach((item) => setCodeSearchBadgeRepo(item, stats));
+      });
+    });
+
+    fileToItems.forEach((els, fileKey) => {
+      const parts = fileKey.split('\u0000');
+      const repo = parts[0];
+      const path = parts.slice(1).join('\u0000');
+      tasks.push(async () => {
+        const date = await fetchSearchFileCommitDate(repo, path);
+        els.forEach((item) => setCodeSearchBadgeFile(item, date));
+      });
+    });
+
+    if (tasks.length) {
+      await runCodeSearchPool(tasks, CODE_SEARCH_FETCH_CONCURRENCY, (fn) => fn());
+      codeSearchDataVersion += 1;
+      scheduleCodeSearchResort();
+    }
+  }
+
+  function refreshCodeSearchBadgeMode() {
+    const showRepo = codeSearchSortField === 'repoDate';
+    document.querySelectorAll(`.${CODE_SEARCH_BADGE_CLASS}`).forEach((badge) => {
+      const file = badge.querySelector('.cs-metric[data-kind="file"]');
+      const repo = badge.querySelector('.cs-metric[data-kind="repo"]');
+      if (file) file.style.display = showRepo ? 'none' : 'inline';
+      if (repo) repo.style.display = showRepo ? 'inline' : 'none';
+    });
+  }
+
+  function ensureCodeSearchSortBar() {
+    if (!isCodeSearchEnabled()) return;
+    if (document.querySelector(`.${CODE_SEARCH_SORT_BAR_CLASS}`)) return;
+
+    const items = Array.from(document.querySelectorAll(CODE_SEARCH_ITEM_SELECTOR));
+    const list = document.querySelector(CODE_SEARCH_LIST_SELECTOR) || (items.length ? items[0].parentNode : null);
+    if (!list || list.querySelector(`.${CODE_SEARCH_SORT_BAR_CLASS}`)) return;
+
+    const bar = document.createElement('div');
+    bar.className = CODE_SEARCH_SORT_BAR_CLASS;
+
+    const mkButton = (label, onClick, primary = false) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `${SCRIPT_ID}-cs-sortbtn${primary ? ` ${SCRIPT_ID}-cs-scanbtn` : ''}`;
+      btn.textContent = label;
+      btn.addEventListener('click', onClick);
+      return btn;
+    };
+
+    bar.appendChild(mkButton('⭐ 按 Star', () => toggleCodeSearchSort('stars')));
+    bar.appendChild(mkButton('📄 按文件更新', () => toggleCodeSearchSort('fileDate')));
+    bar.appendChild(mkButton('🕒 按仓库更新', () => toggleCodeSearchSort('repoDate')));
+    bar.appendChild(mkButton('↺ 恢复默认', () => restoreCodeSearchOrder()));
+    bar.appendChild(mkButton(`📊 扫描前 ${getCodeSearchScanPages()} 页汇总`, () => scanCodeSearchPages(), true));
+
+    list.parentNode.insertBefore(bar, list);
+  }
+
+  function toggleCodeSearchSort(field) {
+    if (codeSearchSortField === field) {
+      codeSearchSortAsc = !codeSearchSortAsc;
+    } else {
+      codeSearchSortField = field;
+      codeSearchSortAsc = false;
+    }
+    refreshCodeSearchBadgeMode();
+    applyCodeSearchSort();
+  }
+
+  function readCodeSearchItemBadge(item) {
+    const badge = item.querySelector(`.${CODE_SEARCH_BADGE_CLASS}`);
+    if (!badge) return null;
+    const starsText = (badge.querySelector('.cs-metric[data-kind="stars"]') || {}).textContent || '';
+    const fileText = (badge.querySelector('.cs-metric[data-kind="file"]') || {}).textContent || '';
+    const repoText = (badge.querySelector('.cs-metric[data-kind="repo"]') || {}).textContent || '';
+    const parseDate = (text) => {
+      const match = String(text).match(/(\d{4}-\d{2}-\d{2})/);
+      return match ? new Date(match[1]).getTime() || 0 : 0;
+    };
+    const parseStars = (text) => {
+      const match = String(text).match(/⭐\s*([\d.]+k?)/);
+      if (!match) return 0;
+      return match[1].endsWith('k') ? Number.parseFloat(match[1]) * 1000 : Number.parseInt(match[1], 10) || 0;
+    };
+    return {
+      stars: parseStars(starsText),
+      fileDate: parseDate(fileText),
+      repoDate: parseDate(repoText),
+      starsReady: badge.dataset.starsReady === '1',
+      fileReady: badge.dataset.fileReady === '1',
+    };
+  }
+
+  function applyCodeSearchSort() {
+    if (!codeSearchSortField) return;
+    const items = Array.from(document.querySelectorAll(CODE_SEARCH_ITEM_SELECTOR));
+    if (!items.length) return;
+    const list = document.querySelector(CODE_SEARCH_LIST_SELECTOR) || items[0].parentNode;
+    if (!list) return;
+
+    const keyed = items.map((el) => ({ el, key: readCodeSearchItemBadge(el) })).filter((row) => row.key);
+    if (!keyed.length) return;
+
+    const isPending = (row) => (codeSearchSortField === 'fileDate' ? !row.key.fileReady : !row.key.starsReady);
+
+    keyed.sort((a, b) => {
+      if (isPending(a) !== isPending(b)) return isPending(a) ? 1 : -1;
+      let va; let vb;
+      if (codeSearchSortField === 'stars') { va = a.key.stars; vb = b.key.stars; }
+      else if (codeSearchSortField === 'fileDate') { va = a.key.fileDate; vb = b.key.fileDate; }
+      else { va = a.key.repoDate; vb = b.key.repoDate; }
+      return codeSearchSortAsc ? va - vb : vb - va;
+    });
+
+    keyed.forEach(({ el }) => list.appendChild(el));
+    codeSearchSortedVersion = codeSearchDataVersion;
+  }
+
+  function restoreCodeSearchOrder() {
+    codeSearchSortField = '';
+    codeSearchSortAsc = false;
+    const items = Array.from(document.querySelectorAll(CODE_SEARCH_ITEM_SELECTOR));
+    if (!items.length) return;
+    const list = document.querySelector(CODE_SEARCH_LIST_SELECTOR) || items[0].parentNode;
+    if (!list) return;
+    items.sort((a, b) => {
+      const ia = codeSearchOriginalOrder.has(a) ? codeSearchOriginalOrder.get(a) : 0;
+      const ib = codeSearchOriginalOrder.has(b) ? codeSearchOriginalOrder.get(b) : 0;
+      return ia - ib;
+    });
+    items.forEach((el) => list.appendChild(el));
+    refreshCodeSearchBadgeMode();
+  }
+
+  /* ----- 代码搜索跨页扫描汇总面板 ----- */
+
+  function parseCodeSearchHtml(html) {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const wrappers = doc.querySelectorAll(CODE_SEARCH_ITEM_SELECTOR);
+    const rows = [];
+    const repos = new Set();
+    for (const el of wrappers) {
+      const repoPath = extractSearchRepoPath(el);
+      if (!repoPath) continue;
+      const lineRange = extractSearchLineRange(el);
+      rows.push({
+        repoPath,
+        filePath: extractSearchFilePath(el),
+        lineStart: lineRange ? lineRange.start : null,
+        lineEnd: lineRange ? lineRange.end : null,
+      });
+      repos.add(repoPath);
+    }
+    return { totalItems: wrappers.length, rows, uniqueRepos: repos.size };
+  }
+
+  function buildCodeSearchFileUrl(repoPath, filePath, lineStart, lineEnd) {
+    if (!filePath) return `https://github.com/${repoPath}`;
+    const encodedPath = filePath.split('/').map((seg) => encodeURIComponent(seg)).join('/');
+    let url = `https://github.com/${repoPath}/blob/HEAD/${encodedPath}`;
+    if (lineStart) {
+      url += (lineEnd && lineEnd !== lineStart) ? `#L${lineStart}-L${lineEnd}` : `#L${lineStart}`;
+    }
+    return url;
+  }
+
+  function getCodeSearchScanPanel() {
+    let panel = document.getElementById(CODE_SEARCH_PANEL_ID);
+    if (panel) return panel;
+
+    panel = document.createElement('div');
+    panel.id = CODE_SEARCH_PANEL_ID;
+    panel.className = CODE_SEARCH_PANEL_ID;
+    panel.innerHTML = `
+      <div class="cs-panel-header">
+        <span class="cs-panel-title">📊 扫描结果</span>
+        <button type="button" class="cs-panel-close" aria-label="关闭面板">✕</button>
+      </div>
+      <div class="cs-panel-stats" style="display:none;"></div>
+      <div class="cs-panel-toolbar">
+        <button type="button" class="cs-toolbtn" data-sort="stars">⭐ Star</button>
+        <button type="button" class="cs-toolbtn" data-sort="fileUpdated">📄 文件更新</button>
+        <button type="button" class="cs-toolbtn" data-sort="repoUpdated">🕒 仓库更新</button>
+        <button type="button" class="cs-toolbtn cs-toolbtn-rescan">重新扫描</button>
+      </div>
+      <div class="cs-panel-progress" style="display:none;">
+        <div class="cs-panel-progress-text"></div>
+        <div class="cs-panel-progress-bar"><div class="cs-panel-progress-fill"></div></div>
+      </div>
+      <div class="cs-panel-list"></div>
+    `;
+    document.body.appendChild(panel);
+
+    panel.querySelector('.cs-panel-close').addEventListener('click', () => {
+      panel.style.display = 'none';
+      codeSearchScanUserClosed = true;
+    });
+    panel.querySelectorAll('.cs-toolbtn[data-sort]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const field = btn.dataset.sort;
+        if (codeSearchScanSortField === field) codeSearchScanSortAsc = !codeSearchScanSortAsc;
+        else { codeSearchScanSortField = field; codeSearchScanSortAsc = false; }
+        rerenderCodeSearchScanPanel();
+      });
+    });
+    panel.querySelector('.cs-toolbtn-rescan').addEventListener('click', () => scanCodeSearchPages());
+    return panel;
+  }
+
+  function renderCodeSearchScanProgress(text, percent) {
+    const panel = getCodeSearchScanPanel();
+    panel.querySelector('.cs-panel-progress').style.display = 'block';
+    panel.querySelector('.cs-panel-progress-text').textContent = text;
+    panel.querySelector('.cs-panel-progress-fill').style.width = `${Math.min(100, percent)}%`;
+  }
+
+  function renderCodeSearchScanError(message) {
+    const panel = getCodeSearchScanPanel();
+    panel.querySelector('.cs-panel-progress').style.display = 'none';
+    panel.querySelector('.cs-panel-list').innerHTML =
+      `<div class="cs-panel-error">${escapeHtmlContent(message)}</div>`;
+  }
+
+  function renderCodeSearchScanResults(rows, stats, keepProgress) {
+    codeSearchScanRows = rows;
+    codeSearchScanStats = stats || [];
+    const panel = getCodeSearchScanPanel();
+    panel.style.display = codeSearchScanUserClosed ? 'none' : 'flex';
+    if (!keepProgress) panel.querySelector('.cs-panel-progress').style.display = 'none';
+
+    const statsEl = panel.querySelector('.cs-panel-stats');
+    if (stats && stats.length) {
+      const totalItems = stats.reduce((sum, s) => sum + (s.items || 0), 0);
+      const uniqueRepos = new Set(rows.map((r) => r.repoPath)).size;
+      const perPage = stats.map((s) => (s.error ? `P.${s.page}:✕` : `P.${s.page}:${s.items}项`)).join(' · ');
+      statsEl.innerHTML =
+        `<div>共扫描 <b>${stats.length}</b> 页 · 结果项 <b>${totalItems}</b> · 唯一文件 <b>${rows.length}</b> · 唯一仓库 <b>${uniqueRepos}</b></div>` +
+        `<div class="cs-panel-statspage">${escapeHtmlContent(perPage)}</div>`;
+      statsEl.style.display = 'block';
+    } else {
+      statsEl.style.display = 'none';
+    }
+
+    const list = panel.querySelector('.cs-panel-list');
+    const fragment = document.createDocumentFragment();
+
+    const sortValue = (row) => {
+      if (codeSearchScanSortField === 'stars') return row.stars === undefined ? null : (row.stars == null ? 0 : row.stars);
+      if (codeSearchScanSortField === 'repoUpdated') return row.repoUpdated === undefined ? null : (row.repoUpdated ? new Date(row.repoUpdated).getTime() : 0);
+      return row.fileUpdated === undefined ? null : (row.fileUpdated ? new Date(row.fileUpdated).getTime() : 0);
+    };
+
+    [...rows].sort((a, b) => {
+      const va = sortValue(a);
+      const vb = sortValue(b);
+      if (va === null && vb === null) return 0;
+      if (va === null) return 1;
+      if (vb === null) return -1;
+      return codeSearchScanSortAsc ? va - vb : vb - va;
+    }).forEach((row) => {
+      const line = document.createElement('div');
+      line.className = 'cs-panel-row';
+      const dateValue = codeSearchScanSortField === 'repoUpdated' ? row.repoUpdated : row.fileUpdated;
+      const starsText = row.stars === undefined ? '…' : formatCompactStars(row.stars);
+      const dateText = dateValue === undefined ? '…' : formatCompactDate(dateValue);
+      const pathSuffix = row.lineStart
+        ? (row.lineEnd && row.lineEnd !== row.lineStart ? ` : L${row.lineStart}-L${row.lineEnd}` : ` : L${row.lineStart}`)
+        : '';
+      const safeRepo = escapeHtmlContent(row.repoPath);
+      const safePath = escapeHtmlContent(row.filePath || '');
+      line.innerHTML = `
+        <div class="cs-panel-row-main">
+          <span class="cs-panel-repo">${safeRepo}</span>
+          <span class="cs-panel-pages">${escapeHtmlContent(row.pages || '')}</span>
+        </div>
+        ${row.filePath ? `<div class="cs-panel-path" title="${safePath}${escapeHtmlContent(pathSuffix)}">${safePath}${escapeHtmlContent(pathSuffix)}</div>` : ''}
+        <div class="cs-panel-meta">
+          <span>⭐ ${starsText}</span>
+          <span>${codeSearchScanSortField === 'repoUpdated' ? '🕒' : '📄'} ${dateText}</span>
+        </div>
+      `;
+      const targetUrl = buildCodeSearchFileUrl(row.repoPath, row.filePath, row.lineStart, row.lineEnd);
+      line.title = targetUrl;
+      line.addEventListener('click', (event) => {
+        if (event.ctrlKey || event.metaKey || event.shiftKey || event.button === 1) return;
+        window.open(targetUrl, '_blank', 'noopener');
+      });
+      fragment.appendChild(line);
+    });
+
+    list.innerHTML = '';
+    list.appendChild(fragment);
+    panel.querySelector('.cs-panel-header .cs-panel-title').textContent =
+      `📊 扫描结果（${rows.length} 文件 / ${new Set(rows.map((r) => r.repoPath)).size} 仓库）`;
+  }
+
+  function resetCodeSearchScanPanel() {
+    const panel = getCodeSearchScanPanel();
+    panel.style.display = 'flex';
+    panel.querySelector('.cs-panel-list').innerHTML = '';
+    panel.querySelector('.cs-panel-stats').style.display = 'none';
+    panel.querySelector('.cs-panel-progress').style.display = 'block';
+    panel.querySelector('.cs-panel-progress-text').textContent = '';
+    panel.querySelector('.cs-panel-progress-fill').style.width = '0%';
+    codeSearchScanRows = [];
+    codeSearchScanStats = [];
+  }
+
+  function rerenderCodeSearchScanPanel() {
+    if (!codeSearchScanRows.length) return;
+    renderCodeSearchScanResults(codeSearchScanRows, codeSearchScanStats, { keepProgress: codeSearchScanBusy });
+  }
+
+  function scheduleCodeSearchScanRender() {
+    if (codeSearchScanRenderTimer) {
+      codeSearchScanRenderQueued = true;
+      return;
+    }
+    codeSearchScanRenderTimer = window.setTimeout(() => {
+      codeSearchScanRenderTimer = 0;
+      rerenderCodeSearchScanPanel();
+      if (codeSearchScanRenderQueued) {
+        codeSearchScanRenderQueued = false;
+        scheduleCodeSearchScanRender();
+      }
+    }, CODE_SEARCH_RESCAN_THROTTLE_MS);
+  }
+
+  async function scanCodeSearchPages() {
+    if (codeSearchScanBusy) {
+      toast('扫描进行中，请稍候');
+      return;
+    }
+    const params = new URLSearchParams(window.location.search || '');
+    const query = params.get('q');
+    if (!query) {
+      toast('当前页面不是搜索结果页');
+      return;
+    }
+
+    const scanPages = getCodeSearchScanPages();
+    if (!getGitHubApiToken() && scanPages > 2) {
+      const proceed = window.confirm(
+        `未设置 GitHub Token，扫描 ${scanPages} 页可能触发匿名 API 限流（60 次/小时）。\n` +
+        '每个文件还需要一次 Commits API 调用，消耗会更大。\n' +
+        '建议先通过菜单「设置 GitHub API Token」配置 Token。\n\n继续吗？',
+      );
+      if (!proceed) return;
+    }
+
+    codeSearchScanBusy = true;
+    codeSearchScanUserClosed = false;
+    resetCodeSearchScanPanel();
+
+    const fileToPages = new Map();
+    const allRepos = new Set();
+    const pageStats = [];
+    const makeKey = (repoPath, filePath, lineStart, lineEnd) =>
+      `${repoPath}\u0000${filePath}\u0000${lineStart || ''}\u0000${lineEnd || ''}`;
+
+    try {
+      // 页面抓取：0-30%
+      for (let page = 1; page <= scanPages; page++) {
+        renderCodeSearchScanProgress(`正在扫描第 ${page} / ${scanPages} 页…`, ((page - 1) / scanPages) * 30);
+        const url = new URL(window.location.href);
+        url.searchParams.set('p', String(page));
+        try {
+          const html = await requestText(url.toString(), {
+            headers: { Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
+            timeout: CODE_SEARCH_PAGE_TIMEOUT_MS,
+          });
+          const parsed = parseCodeSearchHtml(html);
+          pageStats.push({ page, items: parsed.totalItems });
+          parsed.rows.forEach((row) => {
+            const key = makeKey(row.repoPath, row.filePath, row.lineStart, row.lineEnd);
+            if (!fileToPages.has(key)) fileToPages.set(key, new Set());
+            fileToPages.get(key).add(page);
+            allRepos.add(row.repoPath);
+          });
+        } catch (_) {
+          pageStats.push({ page, items: 0, error: true });
+        }
+      }
+
+      if (!fileToPages.size) {
+        renderCodeSearchScanError('未从页面提取到任何文件。可能是 GitHub 页面结构变化或搜索结果为空。');
+        return;
+      }
+
+      const entries = Array.from(fileToPages.keys()).map((key) => {
+        const parts = key.split('\u0000');
+        return {
+          key,
+          repoPath: parts[0],
+          filePath: parts[1] || null,
+          lineStart: parts[2] ? Number.parseInt(parts[2], 10) : null,
+          lineEnd: parts[3] ? Number.parseInt(parts[3], 10) : null,
+        };
+      });
+
+      const infos = entries.map((entry) => ({
+        ...entry,
+        pages: Array.from(fileToPages.get(entry.key)).sort((a, b) => a - b).map((p) => `P.${p}`).join('/'),
+        stars: undefined,
+        repoUpdated: undefined,
+        fileUpdated: entry.filePath ? undefined : null,
+      }));
+      const infoByKey = new Map();
+      const infosByRepo = new Map();
+      entries.forEach((entry, index) => {
+        infoByKey.set(entry.key, infos[index]);
+        if (!infosByRepo.has(entry.repoPath)) infosByRepo.set(entry.repoPath, []);
+        infosByRepo.get(entry.repoPath).push(infos[index]);
+      });
+
+      renderCodeSearchScanResults(infos, pageStats, true);
+
+      // 仓库信息 + 文件提交日期：单池调度，每完成一项刷新进度与面板
+      const tasks = [];
+      Array.from(allRepos).forEach((repoPath) => {
+        tasks.push(async () => {
+          const stats = await fetchSearchRepoStats(repoPath);
+          (infosByRepo.get(repoPath) || []).forEach((row) => {
+            row.stars = stats ? stats.stars : null;
+            row.repoUpdated = stats ? stats.updated : null;
+          });
+        });
+      });
+      entries.forEach((entry) => {
+        if (!entry.filePath) return;
+        tasks.push(async () => {
+          const date = await fetchSearchFileCommitDate(entry.repoPath, entry.filePath);
+          const row = infoByKey.get(entry.key);
+          if (row) row.fileUpdated = date || null;
+        });
+      });
+
+      const totalTasks = tasks.length;
+      let doneTasks = 0;
+      const tick = () => {
+        doneTasks += 1;
+        renderCodeSearchScanProgress(
+          `正在获取 Star 与更新时间 ${doneTasks} / ${totalTasks}…`,
+          30 + (totalTasks ? (doneTasks / totalTasks) * 70 : 70),
+        );
+        scheduleCodeSearchScanRender();
+      };
+      await runCodeSearchPool(tasks.map((task) => async () => {
+        await task();
+        tick();
+      }), CODE_SEARCH_SCAN_CONCURRENCY, (fn) => fn());
+
+      window.clearTimeout(codeSearchScanRenderTimer);
+      codeSearchScanRenderTimer = 0;
+      codeSearchScanRenderQueued = false;
+      renderCodeSearchScanResults(infos, pageStats, false);
+    } catch (error) {
+      window.clearTimeout(codeSearchScanRenderTimer);
+      codeSearchScanRenderTimer = 0;
+      codeSearchScanRenderQueued = false;
+      renderCodeSearchScanError(`扫描失败：${error && error.message || String(error)}`);
+    } finally {
+      codeSearchScanBusy = false;
+    }
+  }
+
+  function installCodeSearchEnhancement() {
+    if (codeSearchInstalled) return;
+    codeSearchInstalled = true;
+
+    window.setTimeout(() => {
+      if (!isCodeSearchPage() || !isCodeSearchEnabled()) return;
+      annotateCodeSearchResults();
+    }, 300);
+
+    codeSearchObserver = new MutationObserver(() => {
+      window.clearTimeout(codeSearchObserveTimer);
+      codeSearchObserveTimer = window.setTimeout(() => {
+        if (isGitHubSearchUiActive()) return;
+        if (!isCodeSearchPage()) return;
+        annotateCodeSearchResults();
+        if (codeSearchSortField && codeSearchDataVersion !== codeSearchSortedVersion) applyCodeSearchSort();
+      }, CODE_SEARCH_OBSERVE_DELAY_MS);
+    });
+    codeSearchObserver.observe(document.body, { childList: true, subtree: true });
+
+    window.addEventListener('popstate', () => {
+      window.setTimeout(() => {
+        if (isCodeSearchPage() && isCodeSearchEnabled()) annotateCodeSearchResults();
+      }, 500);
+    });
+    window.addEventListener('turbo:render', () => {
+      window.setTimeout(() => {
+        if (isCodeSearchPage() && isCodeSearchEnabled()) annotateCodeSearchResults();
+      }, 400);
+    });
   }
 
   function getMirrorSpeed(host) {
@@ -30443,10 +31677,8 @@
       .map((node, index) => ({ node, index, speed: getMirrorSpeed(node.value) }))
       .filter((item) => item.speed && item.speed.ok && isFreshMirrorSpeed(item.speed))
       .sort((a, b) => (Number(a.speed.latency) || Infinity) - (Number(b.speed.latency) || Infinity) || a.index - b.index);
-    return (measured[0] && measured[0].node)
-      || mirrorNodes.find((node) => String(node.label || '').toLowerCase() === 'default')
-      || mirrorNodes[0]
-      || { label: 'default', value: DEFAULT_MIRROR_HOST };
+    // 全部未测速或全部失败时回落到内置列表首项，即默认优先级最高的一个
+    return (measured[0] && measured[0].node) || mirrorNodes[0] || { label: DEFAULT_MIRROR_HOST, value: DEFAULT_MIRROR_HOST };
   }
 
   function getFastestMirrorHost() {
@@ -30540,11 +31772,6 @@ ${actionText}`;
     }
   }
 
-  function readStoredSelectedMirrorHost() {
-    const value = readStringStorage(STORAGE_SELECTED_MIRROR, '');
-    return String(value || '').trim() ? normalizeMirrorHost(value) : '';
-  }
-
   function loadCachedMirrorSpeeds() {
     const cached = readJsonStorage(STORAGE_MIRROR_SPEEDS, {});
     const entries = Array.isArray(cached) ? cached : Object.values(cached || {});
@@ -30574,12 +31801,50 @@ ${actionText}`;
     writeJsonStorage(STORAGE_MIRROR_SPEEDS, payload);
   }
 
+  // 悬浮面板移除后不再有手动指定镜像的入口，选源完全由测速结果决定：
+// 有新鲜的成功测速就取延迟最低的，否则回落到内置列表首项。
   function applyAutomaticMirrorSelection() {
-    if (readStoredSelectedMirrorHost()) return false;
     const next = getFastestMirrorHost();
     if (!next || next === selectedMirrorHost) return false;
     selectedMirrorHost = next;
     return true;
+  }
+
+  function clearLegacyMirrorStorage() {
+    if (legacyMirrorStorageCleared) return;
+    legacyMirrorStorageCleared = true;
+    if (typeof GM_deleteValue !== 'function') return;
+    LEGACY_MIRROR_STORAGE_KEYS.forEach((key) => {
+      try {
+        GM_deleteValue(key);
+      } catch (_) {
+        // 清理失败无副作用，内置源不依赖任何旧键
+      }
+    });
+  }
+
+  function getGitHubApiToken() {
+    return readStringStorage(STORAGE_GITHUB_API_TOKEN, '').trim();
+  }
+
+  function setGitHubApiToken(token) {
+    writeStringStorage(STORAGE_GITHUB_API_TOKEN, String(token || '').trim());
+  }
+
+  function maskGitHubApiToken(token) {
+    const value = String(token || '');
+    if (!value) return '';
+    if (value.length <= 8) return `${value.slice(0, 2)}****`;
+    return `${value.slice(0, 8)}…${value.slice(-4)}`;
+  }
+
+  // Only api.github.com receives the token; mirror hosts are third parties and
+  // must never see the credential.
+  function mergeGitHubApiTokenHeader(url, headers) {
+    const merged = Object.assign({}, headers || {});
+    const token = getGitHubApiToken();
+    if (token && isGitHubApiUrl(url)) merged[GITHUB_API_TOKEN_GRANTED_HEADER] = `Bearer ${token}`;
+    return merged;
   }
 
   function isGitHubApiUrl(url) {
@@ -30636,7 +31901,8 @@ ${actionText}`;
     const kind = getRateLimitKind(response);
     if (!kind) return null;
     const retryAfterMs = getRetryAfterMs(response);
-    const fallbackMs = kind === 'secondary' ? GITHUB_API_SECONDARY_BACKOFF_TTL : GITHUB_API_RATE_LIMIT_BACKOFF_TTL;
+    const tokenFactor = getGitHubApiToken() ? GITHUB_API_TOKEN_BACKOFF_FACTOR : 1;
+    const fallbackMs = (kind === 'secondary' ? GITHUB_API_SECONDARY_BACKOFF_TTL : GITHUB_API_RATE_LIMIT_BACKOFF_TTL) * tokenFactor;
     const backoff = {
       key: GITHUB_API_BACKOFF_HOST_KEY,
       kind,
@@ -30677,7 +31943,7 @@ ${actionText}`;
         GM_xmlhttpRequest({
           method: 'GET',
           url,
-          headers: options.headers || {},
+          headers: mergeGitHubApiTokenHeader(url, options.headers),
           timeout: Number(options.timeout) || 15000,
           onload: (response) => {
             if (response.status >= 200 && response.status < 300) {
@@ -30722,7 +31988,6 @@ ${actionText}`;
     if (mirrorSpeedRequests.has(host)) return Promise.resolve(cached);
 
     mirrorSpeedRequests.add(host);
-    scheduleAssistantRender(0, false);
     const startedAt = Date.now();
     const speedUrl = buildMirrorUrl(host, MIRROR_SPEED_TEST_TARGET);
 
@@ -30741,11 +32006,11 @@ ${actionText}`;
       })
       .finally(() => {
         mirrorSpeedRequests.delete(host);
+        // 首选源变了就重排已有下载按钮，不需要面板介入
         if (selectionChanged) {
           const ctx = getRepoContext(window.location);
           if (ctx) ensureHighSpeedDownloads(ctx);
         }
-        scheduleAssistantRender(90, false);
       });
   }
 
@@ -30776,7 +32041,6 @@ ${actionText}`;
         const ctx = getRepoContext(window.location);
         if (ctx) ensureHighSpeedDownloads(ctx);
       }
-      scheduleAssistantRender(0, false);
       return results;
     });
   }
@@ -30989,8 +32253,6 @@ ${actionText}`;
         repoMetaByPath.set(ctx.repoPath, meta);
         writeCachedRepoMeta(ctx.repoPath, meta);
         renderRepoSizeBadge(ctx, meta);
-        const currentCtx = getRepoContext(window.location);
-        if (currentCtx && currentCtx.repoPath === ctx.repoPath) renderAssistant();
         return meta;
       })
       .catch((error) => {
@@ -31204,12 +32466,73 @@ ${actionText}`;
 
   function getReleaseAssetRow(link) {
     if (!link || typeof link.closest !== 'function') return null;
+    // GitHub 当前渲染：li.Box-row > div > span > a（文件名/时间）
+    // 早期结构是 li.Box-row > a 直接子节点；这里都兼容。
     const row = link.closest('li.Box-row, [role="row"], tr');
-    const linkHost = link.parentElement;
-    const metadataHost = linkHost && linkHost.nextElementSibling;
-    if (!row || !linkHost || !metadataHost || metadataHost.parentElement !== row) return null;
-    if (!row.closest('.Box-footer, details')) return null;
+    if (!row) return null;
+    // 资产行不再被 <details>/<Box-footer> 包裹（改为 <div class="Box">），
+    // 该前置条件已失效，直接移除——有行即可，URL 校验兜底防误伤。
     return row;
+  }
+
+  const RELEASE_DIGEST_PATTERN = /^(sha(?:1|256|512)|md5):/i;
+
+  function compactReleaseDigest(row) {
+    if (!row || typeof row.querySelectorAll !== 'function') return;
+
+    // GitHub 原生结构（expanded_assets）：
+    //   <div class="d-flex flex-justify-end flex-1">
+    //     <span class="Truncate" style="max-width:250px"><span class="Truncate-text">sha256:64位</span></span>
+    //     <span><clipboard-copy value="sha256:64位"/><div class="sr-only"/></span>
+    //   </div>
+    // 注意 clipboard-copy 的祖先链上没有 .Truncate，所以锚点必须取自 .Truncate-text。
+    let digest = '';
+    let textNode = null;
+    const textNodes = Array.from(row.querySelectorAll('.Truncate-text'));
+    for (const node of textNodes) {
+      const candidate = String(node.textContent || '').trim();
+      if (RELEASE_DIGEST_PATTERN.test(candidate)) {
+        digest = candidate;
+        textNode = node;
+        break;
+      }
+    }
+    if (!textNode) return;
+
+    // 隐藏整个可见包裹（含内联 max-width:250px），只留 chip
+    const textHost = (textNode.closest && textNode.closest('.Truncate')) || textNode;
+    let holder = textHost.parentElement;
+    if (!holder || holder === row) holder = textHost;
+
+    // 权威值优先取原生 clipboard-copy 的 value，不受文本截断影响
+    const copy = holder.querySelector('clipboard-copy[value]');
+    const copyValue = copy ? String(copy.getAttribute('value') || '').trim() : '';
+    if (RELEASE_DIGEST_PATTERN.test(copyValue)) digest = copyValue;
+
+    let chip = holder.querySelector(`:scope > .${RELEASE_DIGEST_CHIP_CLASS}`);
+    if (!chip) {
+      chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = RELEASE_DIGEST_CHIP_CLASS;
+      chip.textContent = RELEASE_DIGEST_LABEL;
+      holder.insertBefore(chip, textHost);
+    }
+    chip.dataset.digest = digest;
+    chip.title = `${digest}\n点击复制完整校验值`;
+    chip.setAttribute('aria-label', `复制 SHA256 校验值 ${digest}`);
+    // 属性赋值而非 addEventListener：ensure 会反复调用，避免叠加监听器
+    chip.onclick = (event) => {
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+      copyText(chip.dataset.digest || digest, 'SHA256 校验值');
+    };
+
+    textHost.style.setProperty('display', 'none', 'important');
+    const copyWrap = copy && copy.closest ? copy.closest('span') : null;
+    // 原生复制入口被 chip 取代，否则一行里会出现两个复制按钮
+    if (copyWrap && copyWrap !== holder && copyWrap !== textHost) {
+      copyWrap.style.setProperty('display', 'none', 'important');
+    }
   }
 
   function parseReleaseAssetLink(link, ctx) {
@@ -31268,26 +32591,22 @@ ${actionText}`;
 
   function getReleaseToolsTarget(link) {
     const row = getReleaseAssetRow(link);
-    const nameHost = link && link.parentElement;
-    const host = nameHost && nameHost.nextElementSibling;
-    if (!row || !host || host.parentElement !== row) return null;
+    if (!row) return null;
+
+    // 工具条放在文件名链接所在容器之后：向上找到「文件名链接的包裹容器」，
+    // 在其后插入 .release-tools。容器判定：
+    //   - 现代结构：li.Box-row > div > span > a → 包裹容器是 div（col-md-6 右侧栏）
+    //   - 早期结构：li.Box-row > a → 包裹容器是 li 自身
+    let container = link && link.parentElement;
+    while (container && container !== row && container.parentElement !== row) {
+      container = container.parentElement;
+    }
+    const host = container && container.parentElement === row ? container : row;
 
     Array.from(row.querySelectorAll(`.${SCRIPT_ID}-release-tools-host`)).forEach((candidate) => {
       if (candidate !== host) candidate.classList.remove(`${SCRIPT_ID}-release-tools-host`);
     });
     host.classList.add(`${SCRIPT_ID}-release-tools-host`);
-
-    let nativeMetadata = host.querySelector(`:scope > .${SCRIPT_ID}-release-native-meta`);
-    if (!nativeMetadata) {
-      nativeMetadata = document.createElement('div');
-      nativeMetadata.className = `${SCRIPT_ID}-release-native-meta`;
-      host.insertBefore(nativeMetadata, host.firstChild);
-      Array.from(host.childNodes).forEach((node) => {
-        if (node === nativeMetadata) return;
-        if (node.nodeType === Node.ELEMENT_NODE && node.classList.contains(`${SCRIPT_ID}-release-tools`)) return;
-        nativeMetadata.appendChild(node);
-      });
-    }
 
     let tools = row.querySelector(`.${SCRIPT_ID}-release-tools`);
     if (!tools) {
@@ -31510,6 +32829,8 @@ ${actionText}`;
     const mirrors = getDirectDownloadMirrors(DIRECT_RELEASE_MIRROR_LIMIT);
     const activeHosts = new Set(mirrors.map((node) => node.value));
     items.forEach((item) => {
+      // 先把 64 位摘要折叠成复制按钮，腾出右侧元数据列的宽度给加速按钮
+      compactReleaseDigest(item.row);
       const target = getReleaseToolsTarget(item.link);
       if (!target) return;
       Array.from(target.querySelectorAll(`.${SCRIPT_ID}-release-fast`)).forEach((link) => {
@@ -32029,67 +33350,12 @@ ${actionText}`;
     });
   }
 
-  function applyMirrorNodes(nodes, selected) {
-    const normalizedNodes = uniqMirrorNodes(nodes);
-    mirrorNodes = normalizedNodes.length ? normalizedNodes : FALLBACK_MIRROR_NODES.slice();
-
-    const stored = readStoredSelectedMirrorHost();
-    const rawPreferred = selected || stored;
-    const preferred = rawPreferred ? normalizeMirrorHost(rawPreferred) : '';
-    if (preferred && mirrorNodes.some((node) => node.value === preferred)) {
-      selectedMirrorHost = preferred;
-      if (selected) writeStringStorage(STORAGE_SELECTED_MIRROR, selectedMirrorHost);
-      return;
-    }
-
-    selectedMirrorHost = getFastestMirrorHost();
-  }
-
-  function loadCachedMirrorNodes() {
+  // 镜像节点现在是编译期常量（BUILTIN_MIRROR_HOSTS），不再运行时抓取与持久化。
+  // 这里只负责：装载测速缓存 → 决定当前选用的源。
+  function initMirrorState() {
+    clearLegacyMirrorStorage();
     loadCachedMirrorSpeeds();
-    const cached = readJsonStorage(STORAGE_MIRRORS, []);
-    const fetchedAt = Number(readStringStorage(STORAGE_MIRRORS_FETCHED_AT, '0'));
-    if (Array.isArray(cached) && cached.length) {
-      applyMirrorNodes(cached);
-    } else {
-      applyMirrorNodes(FALLBACK_MIRROR_NODES);
-    }
-    return Date.now() - fetchedAt < MIRROR_CACHE_TTL && mirrorNodes.length > 1;
-  }
-
-  async function refreshMirrorNodes(force = false) {
-    if (!force && loadCachedMirrorNodes()) return mirrorNodes;
-    if (typeof GM_xmlhttpRequest !== 'function') {
-      applyMirrorNodes(mirrorNodes.length ? mirrorNodes : FALLBACK_MIRROR_NODES);
-      return mirrorNodes;
-    }
-
-    try {
-      const html = await requestText(MIRROR_SOURCE_URL);
-      let nodes = parseMirrorNodesFromText(html);
-      const chunks = extractChunkUrls(html);
-
-      for (const chunkUrl of chunks) {
-        if (nodes.length > 1) break;
-        try {
-          nodes = parseMirrorNodesFromText(await requestText(chunkUrl));
-        } catch (_) {
-          // Continue scanning chunks; the node list can move between builds.
-        }
-      }
-
-      if (nodes.length) {
-        applyMirrorNodes(nodes);
-        writeJsonStorage(STORAGE_MIRRORS, mirrorNodes);
-        writeStringStorage(STORAGE_MIRRORS_FETCHED_AT, String(Date.now()));
-        return mirrorNodes;
-      }
-    } catch (error) {
-      console.warn('Sam GitHub Assistant: mirror source refresh failed', error);
-    }
-
-    applyMirrorNodes(mirrorNodes.length ? mirrorNodes : FALLBACK_MIRROR_NODES);
-    return mirrorNodes;
+    selectedMirrorHost = getFastestMirrorHost();
   }
 
   function copyText(value, label) {
@@ -32110,22 +33376,6 @@ ${actionText}`;
     window.open(url, '_blank', 'noopener,noreferrer');
   }
 
-  function getCollapsed() {
-    try {
-      return Boolean(typeof GM_getValue === 'function' ? GM_getValue(STORAGE_COLLAPSED, false) : false);
-    } catch (_) {
-      return false;
-    }
-  }
-
-  function setCollapsed(value) {
-    try {
-      if (typeof GM_setValue === 'function') GM_setValue(STORAGE_COLLAPSED, Boolean(value));
-    } catch (_) {
-      // Ignore storage failures; the panel still works for the current page.
-    }
-  }
-
   function toast(message) {
     const old = document.querySelector(`.${SCRIPT_ID}-toast`);
     if (old) old.remove();
@@ -32144,7 +33394,6 @@ ${actionText}`;
     style.id = `${SCRIPT_ID}-style`;
     style.textContent = `
       :root {
-        --sam-hs-surface: #f7faff;
         --sam-hs-panel: #ffffff;
         --sam-hs-panel-soft: #f1f6ff;
         --sam-hs-border: #d5e2f3;
@@ -32164,301 +33413,6 @@ ${actionText}`;
         --sam-hs-original-bg: #fff0b8;
         --sam-hs-shadow: 0 18px 44px rgba(15, 23, 42, 0.16), 0 4px 16px rgba(37, 99, 235, 0.12);
         --sam-hs-button-shadow: 0 2px 0 rgba(15, 23, 42, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.88);
-      }
-      .${SCRIPT_ID} {
-        --sam-hs-surface: #f7faff;
-        --sam-hs-panel: #ffffff;
-        --sam-hs-panel-soft: #f1f6ff;
-        --sam-hs-border: #d5e2f3;
-        --sam-hs-border-strong: #9fb7d9;
-        --sam-hs-text: #172033;
-        --sam-hs-muted: #667085;
-        --sam-hs-accent: #2563eb;
-        --sam-hs-accent-soft: #eaf2ff;
-        --sam-hs-success: #16834a;
-        --sam-hs-success-soft: #e7f8ee;
-        --sam-hs-warning: #946200;
-        --sam-hs-warning-soft: #fff7d6;
-        --sam-hs-danger: #bc2c1a;
-        --sam-hs-danger-soft: #fff0ed;
-        --sam-hs-size-bg: #dbeafe;
-        --sam-hs-fast-bg: #d8f5e3;
-        --sam-hs-original-bg: #fff0b8;
-        --sam-hs-shadow: 0 18px 44px rgba(15, 23, 42, 0.16), 0 4px 16px rgba(37, 99, 235, 0.12);
-        --sam-hs-button-shadow: 0 2px 0 rgba(15, 23, 42, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.88);
-        position: fixed;
-        right: 20px;
-        bottom: 24px;
-        z-index: 99999;
-        width: min(340px, calc(100vw - 32px));
-        color: var(--sam-hs-text);
-        font: 13px/1.45 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      }
-      body:has(#search-suggestions-dialog[open]) .${SCRIPT_ID},
-      body:has(dialog[aria-label*="Search" i][open]) .${SCRIPT_ID},
-      body:has(dialog[aria-label*="搜索"][open]) .${SCRIPT_ID} {
-        visibility: hidden;
-        pointer-events: none;
-      }
-      .${SCRIPT_ID}[data-collapsed="true"] {
-        width: 52px;
-      }
-      .${SCRIPT_ID}-panel {
-        overflow: hidden;
-        border: 1px solid var(--sam-hs-border);
-        border-radius: 14px;
-        background: linear-gradient(180deg, var(--sam-hs-panel) 0%, var(--sam-hs-surface) 100%);
-        box-shadow: var(--sam-hs-shadow);
-        backdrop-filter: blur(12px);
-      }
-      .${SCRIPT_ID}[data-collapsed="true"] .${SCRIPT_ID}-panel {
-        border-radius: 999px;
-        background: linear-gradient(180deg, #ffffff 0%, #eaf2ff 100%);
-      }
-      .${SCRIPT_ID}[data-collapsed="true"] .${SCRIPT_ID}-body {
-        display: none;
-      }
-      .${SCRIPT_ID}-header {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        padding: 10px 12px;
-        border-bottom: 1px solid var(--sam-hs-border);
-        background: linear-gradient(180deg, rgba(241, 246, 255, 0.96) 0%, rgba(255, 255, 255, 0.94) 100%);
-      }
-      .${SCRIPT_ID}[data-collapsed="true"] .${SCRIPT_ID}-header {
-        border-bottom: 0;
-        justify-content: center;
-        padding: 8px;
-      }
-      .${SCRIPT_ID}-title {
-        min-width: 0;
-        flex: 1;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        color: var(--sam-hs-text);
-        font-size: 13px;
-        font-weight: 720;
-        letter-spacing: 0;
-      }
-      .${SCRIPT_ID}[data-collapsed="true"] .${SCRIPT_ID}-title {
-        display: none;
-      }
-      .${SCRIPT_ID}-toggle,
-      .${SCRIPT_ID}-action {
-        cursor: pointer;
-        border: 1px solid var(--sam-hs-border-strong);
-        border-radius: 8px;
-        background: linear-gradient(180deg, #ffffff 0%, #edf4ff 100%);
-        color: var(--sam-hs-text);
-        box-shadow: var(--sam-hs-button-shadow);
-        transition: transform 140ms cubic-bezier(0.16, 1, 0.3, 1), border-color 140ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 140ms cubic-bezier(0.16, 1, 0.3, 1), background 140ms cubic-bezier(0.16, 1, 0.3, 1);
-      }
-      .${SCRIPT_ID}-toggle {
-        width: 32px;
-        height: 32px;
-        color: var(--sam-hs-accent);
-        font-weight: 700;
-      }
-      .${SCRIPT_ID}[data-collapsed="true"] .${SCRIPT_ID}-toggle {
-        width: 36px;
-        height: 36px;
-        border-radius: 999px;
-        background: linear-gradient(180deg, #ffffff 0%, #dbeafe 100%);
-        color: var(--sam-hs-accent);
-        font-weight: 800;
-      }
-      .${SCRIPT_ID}-toggle:hover,
-      .${SCRIPT_ID}-action:hover {
-        border-color: var(--sam-hs-accent);
-        background: linear-gradient(180deg, #ffffff 0%, #dfeaff 100%);
-        transform: translateY(-1px);
-      }
-      .${SCRIPT_ID}-toggle:active,
-      .${SCRIPT_ID}-action:active {
-        box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.14);
-        transform: translateY(1px);
-      }
-      .${SCRIPT_ID}-toggle:focus-visible,
-      .${SCRIPT_ID}-action:focus-visible,
-      .${SCRIPT_ID}-mirror-option:focus-visible,
-      .${SCRIPT_ID}-fast-link:focus-visible,
-      .${SCRIPT_ID}-code-clone-input:focus-visible {
-        outline: 2px solid rgba(37, 99, 235, 0.32);
-        outline-offset: 2px;
-      }
-      .${SCRIPT_ID}-body {
-        padding: 12px;
-      }
-      .${SCRIPT_ID}-section + .${SCRIPT_ID}-section {
-        margin-top: 12px;
-        padding-top: 12px;
-        border-top: 1px solid var(--sam-hs-border);
-      }
-      .${SCRIPT_ID}-label {
-        margin-bottom: 8px;
-        color: var(--sam-hs-muted);
-        font-size: 12px;
-        font-weight: 700;
-      }
-      .${SCRIPT_ID}-grid {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 8px;
-      }
-      .${SCRIPT_ID}-action {
-        min-height: 34px;
-        padding: 6px 10px;
-        font-weight: 700;
-        text-align: center;
-      }
-      .${SCRIPT_ID}-mirror-panel {
-        display: grid;
-        gap: 8px;
-      }
-      .${SCRIPT_ID}-mirror-toolbar {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 8px;
-      }
-      .${SCRIPT_ID}-mirror-summary {
-        min-width: 0;
-        overflow: hidden;
-        color: var(--sam-hs-muted);
-        font-size: 12px;
-        font-weight: 600;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-      .${SCRIPT_ID}-mirror-list {
-        display: grid;
-        gap: 6px;
-        max-height: 260px;
-        overflow: auto;
-        padding-right: 2px;
-      }
-      .${SCRIPT_ID}-mirror-option {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
-        align-items: center;
-        gap: 8px;
-        width: 100%;
-        min-height: 48px;
-        padding: 9px 10px;
-        border: 1px solid var(--sam-hs-border);
-        border-radius: 8px;
-        background: linear-gradient(180deg, #ffffff 0%, #f7fbff 100%);
-        color: var(--sam-hs-text);
-        font: inherit;
-        text-align: left;
-        cursor: pointer;
-        box-shadow: 0 1px 0 rgba(15, 23, 42, 0.04), inset 0 1px 0 rgba(255, 255, 255, 0.78);
-        transition: transform 140ms cubic-bezier(0.16, 1, 0.3, 1), border-color 140ms cubic-bezier(0.16, 1, 0.3, 1), background 140ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 140ms cubic-bezier(0.16, 1, 0.3, 1);
-      }
-      .${SCRIPT_ID}-mirror-option:hover {
-        border-color: var(--sam-hs-border-strong);
-        background: linear-gradient(180deg, #ffffff 0%, #eef5ff 100%);
-        box-shadow: 0 5px 14px rgba(37, 99, 235, 0.12);
-        transform: translateY(-1px);
-      }
-      .${SCRIPT_ID}-mirror-option[data-selected="true"] {
-        border-color: rgba(37, 99, 235, 0.58);
-        background: linear-gradient(180deg, #ffffff 0%, var(--sam-hs-accent-soft) 100%);
-        box-shadow: inset 3px 0 0 var(--sam-hs-accent), 0 5px 16px rgba(37, 99, 235, 0.14);
-      }
-      .${SCRIPT_ID}-mirror-main {
-        display: grid;
-        gap: 2px;
-        min-width: 0;
-      }
-      .${SCRIPT_ID}-mirror-label {
-        overflow: hidden;
-        color: var(--sam-hs-muted);
-        font-size: 11px;
-        font-weight: 700;
-        text-transform: uppercase;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-      .${SCRIPT_ID}-mirror-host {
-        overflow: hidden;
-        color: var(--sam-hs-text);
-        font-size: 13px;
-        font-weight: 720;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-      .${SCRIPT_ID}-mirror-meta {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        justify-content: flex-end;
-      }
-      .${SCRIPT_ID}-mirror-speed {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        min-width: 58px;
-        padding: 2px 6px;
-        border: 1px solid var(--sam-hs-border);
-        border-radius: 999px;
-        background: #f4f7fb;
-        color: var(--sam-hs-muted);
-        font-size: 11px;
-        font-weight: 720;
-        font-variant-numeric: tabular-nums;
-        line-height: 16px;
-        white-space: nowrap;
-      }
-      .${SCRIPT_ID}-mirror-speed[data-status="ok"] {
-        border-color: rgba(22, 131, 74, 0.24);
-        background: var(--sam-hs-success-soft);
-        color: var(--sam-hs-success);
-      }
-      .${SCRIPT_ID}-mirror-speed[data-status="testing"] {
-        border-color: rgba(154, 103, 0, 0.22);
-        background: var(--sam-hs-warning-soft);
-        color: var(--sam-hs-warning);
-      }
-      .${SCRIPT_ID}-mirror-speed[data-status="timeout"],
-      .${SCRIPT_ID}-mirror-speed[data-status="error"] {
-        border-color: rgba(188, 44, 26, 0.22);
-        background: var(--sam-hs-danger-soft);
-        color: var(--sam-hs-danger);
-      }
-      .${SCRIPT_ID}-mirror-active {
-        display: none;
-        color: var(--sam-hs-accent);
-        font-size: 12px;
-        font-weight: 700;
-      }
-      .${SCRIPT_ID}-mirror-option[data-selected="true"] .${SCRIPT_ID}-mirror-active {
-        display: inline-flex;
-      }
-      .${SCRIPT_ID}-repo-info {
-        display: grid;
-        gap: 6px;
-      }
-      .${SCRIPT_ID}-repo-info-row {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 10px;
-        min-height: 24px;
-      }
-      .${SCRIPT_ID}-repo-info-name {
-        color: var(--sam-hs-muted);
-      }
-      .${SCRIPT_ID}-repo-info-value {
-        min-width: 0;
-        overflow: hidden;
-        color: var(--sam-hs-text);
-        font-weight: 720;
-        text-align: right;
-        text-overflow: ellipsis;
-        white-space: nowrap;
       }
       .${SCRIPT_ID}-repo-injected-button {
         display: inline-flex !important;
@@ -32810,49 +33764,84 @@ ${actionText}`;
         color: var(--fgColor-attention, #9a6700);
       }
 
+      /* 折叠后的 sha256：完整 64 位摘要收进悬停提示与剪贴板，列表里只留一个复制按钮 */
+      .${RELEASE_DIGEST_CHIP_CLASS} {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        min-height: 22px;
+        padding: 2px 8px;
+        border: 1px solid var(--borderColor-default, rgba(31, 35, 40, 0.15));
+        border-radius: 6px;
+        background: var(--bgColor-muted, #f6f8fa);
+        color: var(--fgColor-muted, #656d76);
+        font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+        font-size: 11px;
+        font-weight: 600;
+        line-height: 16px;
+        white-space: nowrap;
+        cursor: pointer;
+      }
+      .${RELEASE_DIGEST_CHIP_CLASS}::before {
+        content: "";
+        width: 6px;
+        height: 6px;
+        flex: 0 0 auto;
+        border-radius: 999px;
+        background: currentColor;
+        opacity: 0.7;
+      }
+      .${RELEASE_DIGEST_CHIP_CLASS}:hover {
+        border-color: var(--borderColor-accent-emphasis, #0969da);
+        background: var(--bgColor-accent-muted, #ddf4ff);
+        color: var(--fgColor-accent, #0969da);
+      }
+      .${RELEASE_DIGEST_CHIP_CLASS}:focus-visible {
+        outline: 2px solid rgba(37, 99, 235, 0.32);
+        outline-offset: 2px;
+      }
+
       /* Direct mirror actions: native GitHub geometry with explicit destinations. */
       .${SCRIPT_ID}-release-tools-host {
         min-width: 0;
-      }
-      .${SCRIPT_ID}-release-native-meta {
-        display: flex;
-        align-items: center;
-        justify-content: flex-end;
-        flex: 1 1 auto;
-        min-width: 0;
+        /* 文件名与加速按钮同行放不下时换行，而不是把按钮压扁 */
+        flex-wrap: wrap;
+        row-gap: 4px;
       }
       .${SCRIPT_ID}-release-tools-host > .${SCRIPT_ID}-release-tools {
         flex: 0 1 auto;
         min-width: 0;
-        margin: -3px 0 -3px 8px;
+        margin: 0 0 0 8px;
       }
       .${SCRIPT_ID}-release-tools {
         display: inline-flex;
         align-items: center;
-        flex-wrap: nowrap;
+        flex-wrap: wrap;
         flex-shrink: 1;
-        gap: 4px;
+        gap: 6px;
         width: auto;
-        max-width: 300px;
+        max-width: 100%;
         vertical-align: middle;
       }
       .${SCRIPT_ID}-release-tools .${SCRIPT_ID}-fast-link {
         min-width: 0;
         min-height: 26px;
-        max-width: 66px;
+        max-width: 108px;
         margin: 0;
-        padding: 3px 7px;
+        padding: 3px 9px;
         overflow: hidden;
         border-radius: 6px;
         text-overflow: ellipsis;
         box-shadow: none;
         transform: none;
+        /* 关键：允许按钮按内容取宽，不再被 flex-shrink 压成 66px 的窄条 */
+        flex: 0 1 auto;
       }
       .${SCRIPT_ID}-release-tools .${SCRIPT_ID}-fast-link:hover {
         transform: none;
       }
       .${SCRIPT_ID}-release-tools .${SCRIPT_ID}-release-original {
-        max-width: 96px;
+        max-width: 124px;
       }
       .${SCRIPT_ID}-fast-link.${SCRIPT_ID}-mirror-primary,
       .${SCRIPT_ID}-fast-raw.${SCRIPT_ID}-mirror-primary {
@@ -32922,24 +33911,14 @@ ${actionText}`;
           flex-wrap: nowrap;
           min-width: auto;
         }
-        .${SCRIPT_ID}-release-native-meta {
-          flex: 0 0 auto;
-          width: 100%;
-        }
         .${SCRIPT_ID}-release-tools-host > .${SCRIPT_ID}-release-tools {
           display: flex;
           justify-content: flex-start;
           flex: 0 0 auto;
-          flex-wrap: nowrap;
+          flex-wrap: wrap;
           width: 100%;
           max-width: 100%;
           margin: 4px 0 0;
-          overflow-x: auto;
-          overflow-y: hidden;
-          scrollbar-width: none;
-        }
-        .${SCRIPT_ID}-release-tools-host > .${SCRIPT_ID}-release-tools::-webkit-scrollbar {
-          display: none;
         }
         .${SCRIPT_ID}-release-tools .${SCRIPT_ID}-fast-link {
           flex: 0 0 auto;
@@ -32985,11 +33964,230 @@ ${actionText}`;
         font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         box-shadow: 0 14px 34px rgba(15, 23, 42, 0.24);
       }
+      /* 时间中文化：旁挂 span 默认继承宿主排版；paint 时会用 getComputedStyle
+         把宿主自身的字号/字色采样成内联样式贴上来，这里只作为取样失败时的兜底 */
+      .${SCRIPT_ID}-localized-time {
+        color: inherit;
+        font: inherit;
+        white-space: nowrap;
+        cursor: help;
+      }
+
+      /* 代码搜索结果徽章：页内注入，使用 Primer 变量以自动适配明暗主题 */
+      .${CODE_SEARCH_BADGE_CLASS} {
+        position: absolute;
+        top: 6px;
+        right: 8px;
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        padding: 2px 8px;
+        border: 1px solid var(--borderColor-muted, #d1d9e0);
+        border-radius: 6px;
+        background: var(--bgColor-muted, #f6f8fa);
+        color: var(--fgColor-muted, #59636e);
+        font: 500 11px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        white-space: nowrap;
+        pointer-events: none;
+        z-index: 2;
+        transition: opacity 0.15s ease;
+      }
+      .${CODE_SEARCH_BADGE_CLASS} .cs-metric {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+      }
+
+      /* 代码搜索排序条：跟随 GitHub 列表宽度，不改变结果行结构 */
+      .${CODE_SEARCH_SORT_BAR_CLASS} {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        margin: 0 0 12px;
+        padding: 8px 12px;
+        border: 1px solid var(--borderColor-muted, #d1d9e0);
+        border-radius: 8px;
+        background: var(--bgColor-muted, #f6f8fa);
+      }
+      .${SCRIPT_ID}-cs-sortbtn {
+        padding: 4px 10px;
+        border: 1px solid var(--borderColor-default, #d1d9e0);
+        border-radius: 6px;
+        background: var(--bgColor-default, #ffffff);
+        color: var(--fgColor-default, #1f2328);
+        font: 500 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        cursor: pointer;
+        transition: background 0.12s ease, border-color 0.12s ease;
+      }
+      .${SCRIPT_ID}-cs-sortbtn:hover {
+        border-color: var(--borderColor-emphasis, #818b98);
+        background: var(--bgColor-inset, #f6f8fa);
+      }
+      .${SCRIPT_ID}-cs-scanbtn {
+        border-color: var(--borderColor-accent-emphasis, #0969da);
+        color: var(--fgColor-accent, #0969da);
+        font-weight: 600;
+      }
+
+      /* 代码搜索跨页汇总面板：脚本自有浮层，沿用助手面板 token */
+      #${CODE_SEARCH_PANEL_ID} {
+        position: fixed;
+        top: 60px;
+        right: 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        width: 380px;
+        max-width: calc(100vw - 40px);
+        padding: 10px 12px;
+        border: 1px solid var(--sam-hs-border);
+        border-radius: 12px;
+        background: var(--sam-hs-panel);
+        color: var(--sam-hs-text);
+        box-shadow: var(--sam-hs-shadow);
+        font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        z-index: 100001;
+      }
+      #${CODE_SEARCH_PANEL_ID} .cs-panel-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        font-weight: 600;
+      }
+      #${CODE_SEARCH_PANEL_ID} .cs-panel-title {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #${CODE_SEARCH_PANEL_ID} .cs-panel-close {
+        flex: 0 0 auto;
+        padding: 2px 6px;
+        border: 0;
+        border-radius: 6px;
+        background: transparent;
+        color: var(--sam-hs-muted);
+        cursor: pointer;
+      }
+      #${CODE_SEARCH_PANEL_ID} .cs-panel-close:hover {
+        background: var(--sam-hs-panel-soft);
+        color: var(--sam-hs-text);
+      }
+      #${CODE_SEARCH_PANEL_ID} .cs-panel-stats,
+      #${CODE_SEARCH_PANEL_ID} .cs-panel-statspage {
+        font-size: 11.5px;
+        color: var(--sam-hs-muted);
+      }
+      #${CODE_SEARCH_PANEL_ID} .cs-panel-statspage {
+        margin-top: 2px;
+        font-size: 11px;
+      }
+      #${CODE_SEARCH_PANEL_ID} .cs-panel-toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      #${CODE_SEARCH_PANEL_ID} .cs-toolbtn {
+        padding: 3px 9px;
+        border: 1px solid var(--sam-hs-border);
+        border-radius: 6px;
+        background: var(--sam-hs-panel-soft);
+        color: var(--sam-hs-text);
+        font-size: 11.5px;
+        cursor: pointer;
+      }
+      #${CODE_SEARCH_PANEL_ID} .cs-toolbtn:hover {
+        border-color: var(--sam-hs-border-strong);
+      }
+      #${CODE_SEARCH_PANEL_ID} .cs-toolbtn-rescan {
+        margin-left: auto;
+        border-color: var(--sam-hs-accent);
+        color: var(--sam-hs-accent);
+        font-weight: 600;
+      }
+      #${CODE_SEARCH_PANEL_ID} .cs-panel-progress-text {
+        margin-bottom: 4px;
+        font-size: 11px;
+        color: var(--sam-hs-muted);
+      }
+      #${CODE_SEARCH_PANEL_ID} .cs-panel-progress-bar {
+        height: 4px;
+        border-radius: 999px;
+        background: var(--sam-hs-panel-soft);
+        overflow: hidden;
+      }
+      #${CODE_SEARCH_PANEL_ID} .cs-panel-progress-fill {
+        height: 100%;
+        width: 0;
+        background: var(--sam-hs-accent);
+        transition: width 0.2s ease;
+      }
+      #${CODE_SEARCH_PANEL_ID} .cs-panel-list {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        max-height: 52vh;
+        overflow: auto;
+      }
+      #${CODE_SEARCH_PANEL_ID} .cs-panel-row {
+        padding: 6px 8px;
+        border: 1px solid var(--sam-hs-border);
+        border-radius: 8px;
+        background: var(--sam-hs-panel-soft);
+        cursor: pointer;
+      }
+      #${CODE_SEARCH_PANEL_ID} .cs-panel-row:hover {
+        border-color: var(--sam-hs-border-strong);
+      }
+      #${CODE_SEARCH_PANEL_ID} .cs-panel-row-main {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      #${CODE_SEARCH_PANEL_ID} .cs-panel-repo {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--sam-hs-accent);
+      }
+      #${CODE_SEARCH_PANEL_ID} .cs-panel-pages {
+        flex: 0 0 auto;
+        font-size: 10.5px;
+        font-weight: 500;
+        color: var(--sam-hs-muted);
+      }
+      #${CODE_SEARCH_PANEL_ID} .cs-panel-path {
+        margin-top: 2px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 11px;
+        color: var(--sam-hs-muted);
+      }
+      #${CODE_SEARCH_PANEL_ID} .cs-panel-meta {
+        display: flex;
+        gap: 10px;
+        margin-top: 3px;
+        font-size: 10.5px;
+        color: var(--sam-hs-muted);
+      }
+      #${CODE_SEARCH_PANEL_ID} .cs-panel-error {
+        padding: 10px;
+        border-radius: 8px;
+        background: var(--sam-hs-danger-soft);
+        color: var(--sam-hs-danger);
+        font-size: 12px;
+      }
+
       @media (prefers-reduced-motion: reduce) {
-        .${SCRIPT_ID}-toggle,
-        .${SCRIPT_ID}-action,
-        .${SCRIPT_ID}-mirror-option,
-        .${SCRIPT_ID}-fast-link {
+        .${SCRIPT_ID}-fast-link,
+        .${SCRIPT_ID}-cs-sortbtn,
+        .${SCRIPT_ID}-localized-time,
+        #${CODE_SEARCH_PANEL_ID} .cs-toolbtn,
+        #${CODE_SEARCH_PANEL_ID} .cs-panel-progress-fill {
           transition: none;
         }
       }
@@ -32997,234 +34195,12 @@ ${actionText}`;
     document.head.appendChild(style);
   }
 
-  function button(label, title, onClick) {
-    const node = document.createElement('button');
-    node.type = 'button';
-    node.className = `${SCRIPT_ID}-action`;
-    node.textContent = label;
-    node.title = title || label;
-    node.addEventListener('click', onClick);
-    return node;
-  }
-
-  function scheduleAssistantRender(delay = 80, refreshPage = true) {
-    if (!document.body) return;
-    window.clearTimeout(assistantRenderTimer);
-    assistantRenderTimer = window.setTimeout(() => {
-      assistantRenderTimer = 0;
-      renderAssistant({ refreshPage });
-    }, delay);
-  }
-
-  function selectMirrorHost(host) {
-    const next = normalizeMirrorHost(host);
-    if (!next) return;
-    selectedMirrorHost = next;
-    writeStringStorage(STORAGE_SELECTED_MIRROR, selectedMirrorHost);
-    renderAssistant();
-  }
-
-  function mirrorSelector() {
-    const wrap = document.createElement('div');
-    wrap.className = `${SCRIPT_ID}-mirror-panel`;
-
-    const toolbar = document.createElement('div');
-    toolbar.className = `${SCRIPT_ID}-mirror-toolbar`;
-
-    const summary = document.createElement('div');
-    summary.className = `${SCRIPT_ID}-mirror-summary`;
-    const selected = getSelectedMirrorNode();
-    summary.textContent = `${mirrorNodes.length} 个节点来自 github.akams.cn`;
-    summary.title = `当前镜像：${selected.value}`;
-
-    const refresh = button('刷新测速', '从 github.akams.cn 刷新镜像并测速', async () => {
-      await refreshMirrorNodes(true);
-      await refreshMirrorSpeeds(true);
-      toast(`镜像节点：${mirrorNodes.length} 个`);
-      renderAssistant();
-    });
-
-    toolbar.appendChild(summary);
-    toolbar.appendChild(refresh);
-    wrap.appendChild(toolbar);
-
-    const list = document.createElement('div');
-    list.className = `${SCRIPT_ID}-mirror-list`;
-
-    mirrorNodes.forEach((node) => {
-      const status = getMirrorSpeedStatus(node.value);
-      const option = document.createElement('button');
-      option.type = 'button';
-      option.className = `${SCRIPT_ID}-mirror-option`;
-      option.dataset.host = node.value;
-      option.dataset.selected = String(node.value === getSelectedMirrorHost());
-      option.title = `[${node.label}] ${node.value} - ${status.text}`;
-
-      const main = document.createElement('span');
-      main.className = `${SCRIPT_ID}-mirror-main`;
-
-      const label = document.createElement('span');
-      label.className = `${SCRIPT_ID}-mirror-label`;
-      label.textContent = formatMirrorNodeLabel(node.label);
-
-      const host = document.createElement('span');
-      host.className = `${SCRIPT_ID}-mirror-host`;
-      host.textContent = node.value;
-
-      main.appendChild(label);
-      main.appendChild(host);
-
-      const meta = document.createElement('span');
-      meta.className = `${SCRIPT_ID}-mirror-meta`;
-
-      const speed = document.createElement('span');
-      speed.className = `${SCRIPT_ID}-mirror-speed`;
-      speed.dataset.status = status.status;
-      speed.textContent = status.text;
-
-      const active = document.createElement('span');
-      active.className = `${SCRIPT_ID}-mirror-active`;
-      active.textContent = '✓';
-
-      meta.appendChild(speed);
-      meta.appendChild(active);
-      option.appendChild(main);
-      option.appendChild(meta);
-
-      option.addEventListener('click', () => {
-        selectMirrorHost(node.value);
-      });
-      list.appendChild(option);
-    });
-
-    wrap.appendChild(list);
-    return wrap;
-  }
-
-  function section(label, actions) {
-    const wrap = document.createElement('div');
-    wrap.className = `${SCRIPT_ID}-section`;
-
-    const title = document.createElement('div');
-    title.className = `${SCRIPT_ID}-label`;
-    title.textContent = label;
-    wrap.appendChild(title);
-
-    const grid = document.createElement('div');
-    grid.className = `${SCRIPT_ID}-grid`;
-    actions.forEach((action) => {
-      if (action) grid.appendChild(action);
-    });
-    wrap.appendChild(grid);
-    return wrap;
-  }
-
-  function customSection(label, child) {
-    const wrap = document.createElement('div');
-    wrap.className = `${SCRIPT_ID}-section`;
-
-    const title = document.createElement('div');
-    title.className = `${SCRIPT_ID}-label`;
-    title.textContent = label;
-    wrap.appendChild(title);
-    wrap.appendChild(child);
-    return wrap;
-  }
-
-  function repoInfoPanel(ctx) {
-    const wrap = document.createElement('div');
-    wrap.className = `${SCRIPT_ID}-repo-info`;
-
-    const row = document.createElement('div');
-    row.className = `${SCRIPT_ID}-repo-info-row`;
-
-    const name = document.createElement('span');
-    name.className = `${SCRIPT_ID}-repo-info-name`;
-    name.textContent = 'Size';
-
-    const value = document.createElement('span');
-    value.className = `${SCRIPT_ID}-repo-info-value ${SCRIPT_ID}-repo-size-value`;
-    const meta = getRepoMetaForDisplay(ctx);
-    value.textContent = meta ? formatRepoSize(meta.size) : 'Loading...';
-    value.title = 'Repository size';
-
-    row.appendChild(name);
-    row.appendChild(value);
-    wrap.appendChild(row);
-    return wrap;
-  }
-
-  function renderAssistant(options = {}) {
-    if (!document.body) return;
-
-    const ctx = getRepoContext(window.location);
-    const old = document.getElementById(SCRIPT_ID);
-    if (!ctx) {
-      if (old) old.remove();
-      removeRepoSizeBadge();
-      return;
-    }
-
-    const collapsed = old ? old.dataset.collapsed === 'true' : getCollapsed();
-    if (old) old.remove();
-    injectStyle();
-
-    const root = document.createElement('div');
-    root.id = SCRIPT_ID;
-    root.className = SCRIPT_ID;
-    root.dataset.collapsed = String(collapsed);
-
-    const panel = document.createElement('div');
-    panel.className = `${SCRIPT_ID}-panel`;
-
-    const header = document.createElement('div');
-    header.className = `${SCRIPT_ID}-header`;
-
-    const title = document.createElement('div');
-    title.className = `${SCRIPT_ID}-title`;
-    title.textContent = '镜像加速';
-    title.title = title.textContent;
-
-    const toggle = document.createElement('button');
-    toggle.type = 'button';
-    toggle.className = `${SCRIPT_ID}-toggle`;
-    toggle.textContent = collapsed ? '镜' : '-';
-    toggle.title = collapsed ? '展开镜像面板' : '折叠镜像面板';
-    toggle.addEventListener('click', () => {
-      const next = root.dataset.collapsed !== 'true';
-      root.dataset.collapsed = String(next);
-      toggle.textContent = next ? '镜' : '-';
-      toggle.title = next ? '展开镜像面板' : '折叠镜像面板';
-      setCollapsed(next);
-    });
-
-    header.appendChild(title);
-    header.appendChild(toggle);
-
-    const body = document.createElement('div');
-    body.className = `${SCRIPT_ID}-body`;
-    body.appendChild(customSection('镜像节点', mirrorSelector()));
-
-    panel.appendChild(header);
-    panel.appendChild(body);
-    root.appendChild(panel);
-    document.body.appendChild(root);
-    if (options.refreshPage !== false) ensurePageEnhancements(ctx);
-  }
+  // 悬浮面板已移除：镜像源改为内置常量 + 后台测速自动选优，
+  // 页面上的加速能力全部走「就地注入按钮」（Raw / Release / Code / ZIP），
+  // 不再存在任何常驻浮层，也就没有折叠、拖拽、手动选源这些状态。
 
   function registerMenus() {
     if (typeof GM_registerMenuCommand !== 'function') return;
-
-    GM_registerMenuCommand('Sam GitHub Assistant: toggle panel', () => {
-      const root = document.getElementById(SCRIPT_ID);
-      if (!root) {
-        renderAssistant();
-        return;
-      }
-      const next = root.dataset.collapsed !== 'true';
-      root.dataset.collapsed = String(next);
-      setCollapsed(next);
-    });
 
     GM_registerMenuCommand('Sam GitHub Assistant: 复制当前仓库', () => {
       const ctx = getRepoContext(window.location);
@@ -33233,9 +34209,116 @@ ${actionText}`;
 
     GM_registerMenuCommand(`Sam GitHub Assistant: ${isLocalizationEnabled() ? 'disable' : 'enable'} Chinese localization`, () => {
       writeStringStorage(STORAGE_LOCALIZATION_ENABLED, isLocalizationEnabled() ? 'false' : 'true');
-      if (isLocalizationEnabled()) scheduleLocalization(0);
+      if (isLocalizationEnabled()) {
+        scheduleLocalization(0);
+        reapplyLocalizedTimes();
+      } else {
+        teardownLocalizedTimes();
+      }
       toast(`GitHub 中文化已${isLocalizationEnabled() ? '启用' : '关闭'}`);
     });
+
+    registerMenuSeparator();
+
+    // 时间中文化模式（参考 .tmp/GitHub Releases · 中文时间）
+    const localizedTimeMode = getLocalizedTimeMode();
+    LOCALIZED_TIME_MODES.forEach((mode) => {
+      GM_registerMenuCommand(
+        `Sam GitHub Assistant: ${mode.id === localizedTimeMode ? '●' : '○'} 时间中文化 · ${mode.label}`,
+        () => {
+          setLocalizedTimeMode(mode.id);
+          reapplyLocalizedTimes();
+          registerMenus();
+        },
+      );
+    });
+    GM_registerMenuCommand(`Sam GitHub Assistant: 时间时区（当前：${getLocalizedTimeZone() || '系统时区'}）`, () => {
+      const input = prompt(
+        '输入 IANA 时区（留空跟随系统时区）：\n例如 Asia/Shanghai、America/Los_Angeles',
+        getLocalizedTimeZone() || '',
+      );
+      if (input === null) return;
+      const next = String(input).trim();
+      if (next) {
+        try {
+          new Intl.DateTimeFormat('zh-CN', { timeZone: next });
+        } catch (_) {
+          window.alert(`时区无效：${next}`);
+          return;
+        }
+      }
+      setLocalizedTimeZone(next);
+      reapplyLocalizedTimes();
+      registerMenus();
+    });
+
+    registerMenuSeparator();
+
+    // 代码搜索增强（参考 .tmp/GitHub 代码搜索 Star & 更新时间排序助手）
+    GM_registerMenuCommand(`Sam GitHub Assistant: ${isCodeSearchEnabled() ? 'disable' : 'enable'} code search star/date enhancement`, () => {
+      setCodeSearchEnabled(!isCodeSearchEnabled());
+      toast(`代码搜索 Star/时间增强已${isCodeSearchEnabled() ? '启用' : '关闭'}`);
+      if (isCodeSearchEnabled()) {
+        annotateCodeSearchResults();
+      } else {
+        restoreCodeSearchOrder();
+      }
+    });
+    GM_registerMenuCommand(`Sam GitHub Assistant: code search scan pages (${getCodeSearchScanPages()})`, () => {
+      const input = prompt('扫描前几页？（1-20，当前 ' + getCodeSearchScanPages() + '）', String(getCodeSearchScanPages()));
+      if (input === null) return;
+      const num = Number.parseInt(input, 10);
+      if (num >= 1 && num <= CODE_SEARCH_SCAN_PAGE_LIMIT) {
+        writeStringStorage(STORAGE_CODE_SEARCH_SCAN_PAGES, String(num));
+        toast(`已设置为扫描前 ${num} 页`);
+        if (isCodeSearchPage()) ensureCodeSearchSortBar();
+      } else {
+        window.alert('请输入 1-20 之间的整数');
+      }
+    });
+
+    GM_registerMenuCommand(`Sam GitHub Assistant: 未命中词条收集 ${isMissedTermsEnabled() ? '●' : '○'}`, () => {
+      const next = !isMissedTermsEnabled();
+      writeStringStorage(STORAGE_MISSED_TERMS_ENABLED, next ? 'true' : 'false');
+      toast(`未命中词条收集已${next ? '开启' : '关闭'}`);
+      if (next) missedLocalizationTerms.clear();
+      registerMenus();
+    });
+    GM_registerMenuCommand('Sam GitHub Assistant: 导出未命中词条到控制台', () => {
+      dumpMissedLocalizationTerms();
+    });
+
+    registerMenuSeparator();
+
+    // GitHub API Token（提高 API 配额，避免限流退避）
+    GM_registerMenuCommand('Sam GitHub Assistant: 设置 GitHub API Token', () => {
+      const input = prompt(
+        '请输入 GitHub Personal Access Token（仅需 public_repo 权限）。\n配置后 API 配额从 60 次/小时提升到 5000 次/小时，并缩短限流退避。',
+        getGitHubApiToken(),
+      );
+      if (input === null) return;
+      setGitHubApiToken(input);
+      toast('GitHub API Token 已保存');
+    });
+    GM_registerMenuCommand('Sam GitHub Assistant: 清除 GitHub API Token', () => {
+      if (!getGitHubApiToken()) return;
+      if (!window.confirm('确定清除已保存的 GitHub API Token 吗？')) return;
+      setGitHubApiToken('');
+      toast('GitHub API Token 已清除');
+    });
+    GM_registerMenuCommand('Sam GitHub Assistant: GitHub API Token 状态', () => {
+      const token = getGitHubApiToken();
+      if (token) {
+        window.alert(`已设置 Token：${maskGitHubApiToken(token)}\nAPI 速率限制：5000 次/小时`);
+      } else {
+        window.alert('未设置 Token。\n当前使用匿名 API，速率限制为 60 次/小时，建议设置 Token。');
+      }
+    });
+  }
+
+  function registerMenuSeparator() {
+    // Tampermonkey 没有原生分隔符；用一个占位项维持菜单分组可读性
+    GM_registerMenuCommand('――――――――――――――――――――――――――――――――', () => {});
   }
 
   function install() {
@@ -33246,14 +34329,17 @@ ${actionText}`;
 
     console.info('Sam GitHub Assistant installed', location.href);
     installReadmeSwitcher();
-    loadCachedMirrorNodes();
-    renderAssistant();
+    initMirrorState();
+    injectStyle();
     installLocalization();
+    installLocalizedTimes();
+    installCodeSearchEnhancement();
     registerMenus();
-    refreshMirrorSpeeds(false);
-    refreshMirrorNodes(false).then(() => {
-      renderAssistant();
-      refreshMirrorSpeeds(false);
+    // 后台并发探测内置源（并发 4），测速完成后自动把首选源换成延迟最低的那个，
+    // 并重排页面上已经注入的加速按钮。无需用户交互。
+    refreshMirrorSpeeds(false).then(() => {
+      const ctx = getRepoContext(window.location);
+      if (ctx && !isGitHubSearchUiActive()) ensurePageEnhancements(ctx);
     });
 
     let lastUrl = location.href;
@@ -33276,7 +34362,8 @@ ${actionText}`;
         return;
       }
       lastUrl = location.href;
-      window.setTimeout(renderAssistant, RENDER_DELAY_NORMAL_MS);
+      // 页面（Turbo 导航）换了就重排注入按钮；搜索弹层打开时由 scheduleEnhancements 自行退避
+      scheduleEnhancements(RENDER_DELAY_NORMAL_MS);
     };
 
     const observer = new MutationObserver(rerender);
@@ -33287,13 +34374,13 @@ ${actionText}`;
     });
     window.addEventListener('turbo:render', () => {
       lastUrl = '';
-      window.setTimeout(renderAssistant, RENDER_DELAY_FAST_MS);
+      scheduleEnhancements(RENDER_DELAY_FAST_MS);
     });
   }
 
   // Only expose essential public APIs - freeze to prevent modification
   globalThis.__SAM_GITHUB_ASSISTANT_CORE__ = Object.freeze({
-    version: '1.1.0',
+    version: '1.2.0',
     // Public utility functions
     getRepoContext,
     buildMirrorUrl,
